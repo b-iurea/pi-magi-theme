@@ -1,0 +1,64 @@
+# pi-magi-theme
+
+A three-mind council theme + extension for [pi](https://pi.dev): a detailed Tree of Life in the header, the three MAGI in a fixed side panel, live llama-swap telemetry, and `/magi`, a council of three models that votes on your engineering questions.
+
+All artwork is original. The symbolism (the three Magi, the Tree of Life, the golem, the seven seals) is public domain.
+
+## Install
+
+Clone the repo and point pi at it (no copying: edits in the repo are live on the next pi start). In `~/.pi/agent/settings.json`:
+
+```json
+"extensions": ["/path/to/pi-magi-theme/extensions/magi"],
+"themes": ["/path/to/pi-magi-theme/themes"],
+"theme": "magi",
+"tuiMode": "fullscreen"
+```
+
+`tuiMode: fullscreen` keeps the side panel fixed while the chat scrolls.
+
+Commands: `/magi <question>`, `/magi config`, `/magi-ui [on|off|panel]`.
+
+## Lore ↔ function
+
+Every symbol stands for something real the agent is doing.
+
+| Symbol | Meaning | Function | Where |
+|--------|---------|----------|-------|
+| Tree of Life, upper triad (Keter, Chokmah, Binah) | will, wisdom, understanding | the model is **thinking** | footer |
+| light descending Tiferet → Malkuth | manifestation | the model is **streaming the answer** (with live tok/s) | footer |
+| light ascending Malkuth → Keter | ascent | the model is **being loaded into VRAM** | footer |
+| Malkuth at rest | the kingdom | **idle**, with the last run duration | footer |
+| MELCHIOR · BALTHASAR · CASPAR | the three Magi | light up while **thinking**, give the **verdict** when answering, boot on model load; `/magi` council | panel |
+| the golem, EMET ("truth") | a clay servant that acts | a **tool is running** | panel + footer |
+| the golem, MET ("death") | the aleph is erased | a **tool failed** | panel + footer |
+| SYNC | the golem's obedience | **tool success rate** | panel + footer |
+| CHESED ✓ / GEBURAH ✗ | mercy / severity | **successful / failed tools** | panel + footer |
+| the seven seals | the end of an age | **context window usage**, one seal per seventh | panel |
+| breaking the seals → seventh seal opened | apocalypse and renewal | **context compaction** running → done | panel + footer |
+
+## The council
+
+`/magi <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
+
+| Unit | Nature | Looks at |
+|------|--------|----------|
+| MELCHIOR | PRAGMATIST | simplest working solution, effort vs value, reuse, YAGNI |
+| BALTHASAR | GUARDIAN | failure modes, security, operability, maintainability |
+| CASPAR | VISIONARY | reframing the problem, alternatives, DX, evolution |
+
+Each MAGI also gets the recent conversation as context. Full opinions are added to the chat (not sent to the agent).
+
+`/magi config` picks a model per unit and saves `~/.pi/agent/magi.json` (unset = current session model). Optional per-unit thinking:
+
+```json
+{ "MELCHIOR": { "model": "llama-swap/Qwen3.8 27B Q4_K_M - Thinking", "thinking": "low" } }
+```
+
+## llama-swap
+
+When the session model uses the `llama-swap` provider, the side panel:
+
+- loads the model into VRAM on startup and on model change (`GET /upstream/<model>/health`), with a MAGI boot animation;
+- shows VRAM, GPU load/temperature/power and RAM from `/metrics`;
+- shows server-measured tok/s, prompt tok/s and KV cache hits from `/api/metrics/activity`.
