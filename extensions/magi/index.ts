@@ -4,22 +4,24 @@
  * One public-domain mythology, every symbol bound to a real function:
  *  - the TREE OF LIFE shows where the agent is: the upper triad while it thinks, the light descending
  *    to Malkuth while it answers, ascending while the model is loaded into VRAM, at rest in Malkuth when idle
- *  - the three MAGI (MELCHIOR / BALTHASAR / CASPAR) deliberate: they light up while the model thinks,
- *    give the verdict when it answers, and form the /magi council (three real models voting)
- *  - the GOLEM acts: it is animated by EMET ("truth") while tools run; a failing tool erases the aleph
- *    and EMET becomes MET ("death"). SYNC is the golem's obedience: the tool success rate
+ *  - the three MAGI (MELCHIOR / BALTHASAR / CASPAR) flicker while the agent works, showing what it is doing,
+ *    and form the /magi council: three real models voting (on a question, or on the pending git diff)
+ *  - the GOLEM acts: it is animated by EMET ("truth") while tools run, showing the file or command it works on;
+ *    a failing tool erases the aleph and EMET becomes MET ("death"). SYNC is the tool success rate
  *  - CHESED (mercy) and GEBURAH (severity) count successful and failed tools
- *  - the SEVEN SEALS measure the context window; compaction breaks the seventh seal and the world is remade
- *  - llama-swap telemetry: VRAM, GPU load/temp/power, RAM, server-side tok/s, prompt tok/s, cache hits
- *  - /magi config → assign a model to each MAGI (~/.pi/agent/magi.json)
+ *  - the SEVEN SEALS measure the context window; the sixth warns before compaction, the seventh opens when it runs
+ *  - llama-swap telemetry: VRAM, GPU load/temp/power, energy used, RAM, server-side tok/s, prompt tok/s, cache hits
+ *  - /magi config → assign a model to each MAGI; /magi-ui compact|status → smaller panel, llama-swap report
  *
  * Artwork is original; the symbolism is public domain.
  * Use with the theme ../../themes/magi.json
  */
 
+import { execFile } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
@@ -40,8 +42,9 @@ const MAGI_WORD = [
 /** Tree of Life canvas, in terminal cells; drawn with braille dots (2×4 sub-pixels per cell). */
 const TREE_W = 30;
 const TREE_H = 20;
+const TREE_H_SMALL = 10;
 
-/** Sephirot in the order of the "lightning flash" (Keter → Malkuth), positioned in sub-pixels. */
+/** Sephirot in the order of the "lightning flash" (Keter → Malkuth), positioned in sub-pixels of the full-size tree. */
 const SEPHIROT = [
 	{ name: "KETER", meaning: "the crown", x: 30, y: 5 },
 	{ name: "CHOKMAH", meaning: "wisdom", x: 50, y: 19 },
@@ -71,10 +74,16 @@ const BRAILLE_BITS = [
 	[0x40, 0x80],
 ]; // [row][col] → dot bit
 
-/** Rasterizes the Tree of Life into braille: paths (muted), Da'at (dim, dashed), sephirot (accent rings). */
-function renderTreeOfLife(th: Theme): string[] {
+/**
+ * Rasterizes the Tree of Life into braille: paths (muted), Da'at (dim, dashed), sephirot (accent rings).
+ * `rows` scales the tree vertically (20 = full size, 10 = small header for short terminals).
+ */
+function renderTreeOfLife(th: Theme, rows = TREE_H): string[] {
 	const W = TREE_W * 2;
-	const H = TREE_H * 4;
+	const H = rows * 4;
+	const scale = rows / TREE_H;
+	const small = rows < TREE_H;
+	const at = (p: { x: number; y: number }) => ({ x: p.x, y: 4 + (p.y - 4) * scale });
 	const PATH = 1;
 	const DAAT_PX = 2;
 	const NODE = 3;
@@ -85,32 +94,33 @@ function renderTreeOfLife(th: Theme): string[] {
 		if (rx >= 0 && ry >= 0 && rx < W && ry < H) px[ry * W + rx] = v;
 	};
 	for (const [a, b] of TREE_PATHS) {
-		const p = SEPHIROT[a]!;
-		const q = SEPHIROT[b]!;
+		const p = at(SEPHIROT[a]!);
+		const q = at(SEPHIROT[b]!);
 		const n = Math.ceil(Math.max(Math.abs(q.x - p.x), Math.abs(q.y - p.y)));
 		for (let i = 0; i <= n; i++) set(p.x + ((q.x - p.x) * i) / n, p.y + ((q.y - p.y) * i) / n, PATH);
 	}
 	// ring of radius r, cleared inside and with a small gap around it so paths stop short of the circle;
 	// dashed rings keep every other 30° arc
-	const ring = (cx: number, cy: number, r: number, v: number, dashed: boolean) => {
+	const ring = (c: { x: number; y: number }, r: number, v: number, dashed: boolean) => {
 		for (let y = -r - 2; y <= r + 2; y++) {
 			for (let x = -r - 2; x <= r + 2; x++) {
 				const d = Math.hypot(x, y);
 				if (d > r + 1.5) continue;
 				const onRing = d > r - 0.7 && d <= r + 0.5;
 				const arc = Math.floor((Math.atan2(y, x) + Math.PI) / (Math.PI / 6)) % 2 === 0;
-				set(cx + x, cy + y, onRing && (!dashed || arc) ? v : 0);
+				set(c.x + x, c.y + y, onRing && (!dashed || arc) ? v : 0);
 			}
 		}
 	};
-	ring(DAAT.x, DAAT.y, 3, DAAT_PX, true);
+	ring(at(DAAT), small ? 2 : 3, DAAT_PX, true);
 	for (const s of SEPHIROT) {
-		ring(s.x, s.y, 3.5, NODE, false);
-		set(s.x, s.y, NODE);
+		const c = at(s);
+		ring(c, small ? 2.5 : 3.5, NODE, false);
+		set(c.x, c.y, NODE);
 	}
 
 	const lines: string[] = [];
-	for (let row = 0; row < TREE_H; row++) {
+	for (let row = 0; row < rows; row++) {
 		let line = "";
 		for (let col = 0; col < TREE_W; col++) {
 			let bits = 0;
@@ -178,7 +188,6 @@ const GOLEM_FALLEN = [
 
 const MAGI_UNITS = ["MELCHIOR", "BALTHASAR", "CASPAR"] as const;
 type MagiUnit = (typeof MAGI_UNITS)[number];
-const MAGI_TASKS = ["ANALYSIS", "SYNTHESIS", "VERIFY"] as const;
 
 function pulseFrames(theme: Theme): string[] {
 	return [
@@ -191,25 +200,42 @@ function pulseFrames(theme: Theme): string[] {
 	];
 }
 
+/** Pseudo-random on/off per unit, changing every `hold` frames: the MAGI flicker while they work. */
+function flicker(frame: number, unit: number, hold = 2): boolean {
+	const x = Math.imul(Math.floor(frame / hold) + 1, 2654435761) ^ Math.imul(unit + 1, 40503);
+	return (x >>> 0) % 100 < 55;
+}
+
 /* ─────────────────────────────────────────────────────── live state ── */
 
 type Phase = "idle" | "thinking" | "responding" | "tool";
+type Vote = "APPROVE" | "CONDITIONAL" | "REJECT";
 
 const state = {
 	phase: "idle" as Phase,
 	phaseSince: Date.now(),
 	toolName: "",
+	toolTarget: "", // file or command the current tool works on
 	turns: 0,
 	toolOk: 0, // CHESED
 	toolFail: 0, // GEBURAH
 	lastFailAt: 0,
 	lastFailTool: "",
+	lastFailTarget: "",
 	runStart: 0,
 	lastRunMs: 0,
 	compacting: false,
 	compactSince: 0,
 	compactBy: "", // who opens the seals: "smart-compact" (pi-smart-compact package) or "pi native"
 	rebornAt: 0,
+	hasSmartCompact: false,
+	lastCouncil: undefined as { verdict: Vote | null; tally: number; question: string } | undefined,
+};
+
+/** Panel preferences, persisted under "ui" in ~/.pi/agent/magi.json. */
+const ui = {
+	compact: false,
+	kwhPrice: undefined as number | undefined, // price per kWh, for the energy cost line
 };
 
 function setPhase(p: Phase): void {
@@ -221,6 +247,8 @@ function setPhase(p: Phase): void {
 const ANIM_STEP_MS = 220;
 const FAIL_FLASH_MS = 2500;
 const REBIRTH_MS = 6000;
+const DONE_TITLE_AFTER_MS = 30_000;
+const SIXTH_SEAL_PERCENT = (6 / 7) * 100;
 
 /** Golem obedience: share of tool calls that succeeded (null before the first tool). */
 function syncPercent(): number | null {
@@ -238,6 +266,17 @@ function animating(now = Date.now()): boolean {
 		now - state.rebornAt < REBIRTH_MS ||
 		now - state.lastFailAt < FAIL_FLASH_MS
 	);
+}
+
+/** What a tool works on, from its arguments: a path, a command, a pattern, or the first short string. */
+function toolTarget(args: unknown): string {
+	if (!args || typeof args !== "object") return "";
+	const a = args as Record<string, unknown>;
+	for (const key of ["path", "file_path", "filePath", "command", "cmd", "pattern", "query", "url"]) {
+		if (typeof a[key] === "string" && a[key]) return String(a[key]).replace(/\s+/g, " ").trim();
+	}
+	const first = Object.values(a).find((v) => typeof v === "string" && v.length > 0 && v.length < 200);
+	return typeof first === "string" ? first.replace(/\s+/g, " ").trim() : "";
 }
 
 /** Performance of the current stream / last message. */
@@ -270,6 +309,8 @@ const sessionStart = Date.now();
 
 let liveCtx: ExtensionContext | undefined;
 
+/* ── token totals: counted once per message instead of rescanning the whole session ── */
+
 interface TokenStats {
 	input: number;
 	output: number;
@@ -277,24 +318,26 @@ interface TokenStats {
 	cost: number;
 }
 
-let statsCache: { at: number; value: TokenStats } = { at: 0, value: { input: 0, output: 0, cacheRead: 0, cost: 0 } };
+const tokens: TokenStats = { input: 0, output: 0, cacheRead: 0, cost: 0 };
 
-function tokenStats(): TokenStats {
-	const now = Date.now();
-	if (now - statsCache.at < 500) return statsCache.value;
-	const value: TokenStats = { input: 0, output: 0, cacheRead: 0, cost: 0 };
-	const branch = liveCtx?.sessionManager?.getBranch?.() ?? [];
-	for (const entry of branch) {
-		if (entry.type === "message" && entry.message.role === "assistant") {
-			const m = entry.message as AssistantMessage;
-			value.input += m.usage.input;
-			value.output += m.usage.output;
-			value.cacheRead += m.usage.cacheRead ?? 0;
-			value.cost += m.usage.cost.total;
+function addUsage(m: AssistantMessage): void {
+	tokens.input += m.usage?.input ?? 0;
+	tokens.output += m.usage?.output ?? 0;
+	tokens.cacheRead += m.usage?.cacheRead ?? 0;
+	tokens.cost += m.usage?.cost?.total ?? 0;
+}
+
+/** Full recount: on session start and when switching branch. Also restores the last council verdict. */
+function recountSession(ctx: ExtensionContext): void {
+	Object.assign(tokens, { input: 0, output: 0, cacheRead: 0, cost: 0 });
+	state.lastCouncil = undefined;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type === "message" && entry.message.role === "assistant") addUsage(entry.message as AssistantMessage);
+		if (entry.type === "custom" && entry.customType === "magi-verdict") {
+			const d = entry.data as { verdict?: Vote | null; tally?: number; question?: string } | undefined;
+			if (d && Array.isArray((d as any).opinions)) state.lastCouncil = { verdict: d.verdict ?? null, tally: d.tally ?? 0, question: d.question ?? "" };
 		}
 	}
-	statsCache = { at: now, value };
-	return value;
 }
 
 function fmtTokens(n: number): string {
@@ -322,11 +365,17 @@ function bar(theme: Theme, filled: number, total: number, tone: ThemeColor): str
 	return theme.fg(tone, "▓".repeat(f)) + theme.fg("dim", "░".repeat(total - f));
 }
 
-/** The seven seals of the context window: one breaks every 1/7 of it. */
-function renderSeals(theme: Theme, percent: number): string {
+/** The seven seals of the context window: one breaks every 1/7 of it; the sixth blinks as a warning. */
+function renderSeals(theme: Theme, percent: number, now = Date.now()): string {
 	const broken = Math.min(7, Math.floor((percent / 100) * 7));
 	const tone = usageTone(percent);
-	return theme.fg(tone, "◉".repeat(broken)) + theme.fg("dim", "○".repeat(7 - broken));
+	let out = "";
+	for (let i = 0; i < 7; i++) {
+		if (i >= broken) out += theme.fg("dim", "○");
+		else if (broken === 6 && i === 5) out += theme.fg(Math.floor(now / 500) % 2 ? "warning" : "error", "◉");
+		else out += theme.fg(tone, "◉");
+	}
+	return out;
 }
 
 /* ──────────────────────────────────────────────────── MAGI triangle ── */
@@ -370,9 +419,13 @@ function magiDiagram(th: Theme, top: UnitView, left: UnitView, right: UnitView, 
 
 /* ─────────────────────────────────────────────────────────── header ── */
 
+/** Terminals shorter than this get the small (10-row) tree in the header. */
+const SHORT_TERMINAL_ROWS = 45;
+
 /** Static header: it scrolls away with the conversation, so nothing here animates. */
 function buildHeader(theme: Theme) {
-	const tree = renderTreeOfLife(theme);
+	let full: string[] | undefined;
+	let small: string[] | undefined;
 
 	return {
 		render(width: number): string[] {
@@ -382,6 +435,8 @@ function buildHeader(theme: Theme) {
 			const triad = MAGI_UNITS.map((u) => theme.fg("success", u)).join(dim(" · "));
 			const subtitle = "KETER → MALKUTH · 10 SEPHIROT · 22 PATHS";
 			const lore = "THE MAGI JUDGE · THE GOLEM ACTS · THE SEALS KEEP TIME";
+			const short = (process.stdout.rows ?? 50) < SHORT_TERMINAL_ROWS;
+			const tree = short ? (small ??= renderTreeOfLife(theme, TREE_H_SMALL)) : (full ??= renderTreeOfLife(theme));
 
 			// Narrow layout: a single identification line.
 			if (width < 44) {
@@ -396,14 +451,15 @@ function buildHeader(theme: Theme) {
 				return lines.map((l) => truncateToWidth(l, width));
 			}
 
-			// Wide layout: tree left, wordmark right.
+			// Wide layout: tree left, wordmark right (rows chosen to center the text block on the tree).
+			const [wordAt, triadAt] = short ? [0, 7] : [5, 12];
 			const lines = [""];
 			for (let i = 0; i < tree.length; i++) {
 				let right = "";
-				if (i >= 5 && i <= 10) right = orange(MAGI_WORD[i - 5]!);
-				else if (i === 12) right = dim("├─ ") + triad + dim(" ─┤");
-				else if (i === 13) right = muted(subtitle);
-				else if (i === 14) right = dim(lore);
+				if (i >= wordAt && i < wordAt + MAGI_WORD.length) right = orange(MAGI_WORD[i - wordAt]!);
+				else if (i === triadAt) right = dim("├─ ") + triad + dim(" ─┤");
+				else if (i === triadAt + 1) right = muted(subtitle);
+				else if (i === triadAt + 2) right = dim(lore);
 				lines.push(truncateToWidth(tree[i]! + "    " + right, width));
 			}
 			lines.push("");
@@ -424,13 +480,14 @@ interface GpuStat {
 	power: number;
 }
 
-type SwapState = "off" | "checking" | "loading" | "ready" | "error";
+type SwapState = "off" | "checking" | "loading" | "ready" | "asleep" | "error";
 
 /** Live state of the llama-swap server behind the session model (only when the provider is "llama-swap"). */
 const swap = {
 	base: "", // e.g. http://host:9292
 	headers: {} as Record<string, string>,
-	modelId: "",
+	modelId: "", // the id pi uses (may be an alias)
+	realId: "", // the model llama-swap actually runs for that id
 	state: "off" as SwapState,
 	since: 0, // when the current state started
 	loadMs: 0, // how long the last real load took
@@ -442,6 +499,9 @@ const swap = {
 	srvPps: 0, // server-measured prompt processing tok/s
 	cacheTokens: 0,
 	inputTokens: 0,
+	energyWh: 0, // GPU energy since the session started
+	lastSampleAt: 0,
+	lastWatts: 0,
 };
 
 function setSwapState(s: SwapState, error = ""): void {
@@ -478,20 +538,46 @@ function parseSwapMetrics(text: string): void {
 	swap.gpus = [...gpus.entries()].sort(([a], [b]) => Number(a) - Number(b)).map(([, g]) => g);
 }
 
+/**
+ * Integrates GPU power over time into Wh.
+ * ponytail: trapezoid over the 3–30s poll samples, GPUs only; gaps over 60s are clamped.
+ */
+function sampleEnergy(now = Date.now()): void {
+	const watts = swap.gpus.reduce((sum, g) => sum + g.power, 0);
+	if (swap.lastSampleAt) {
+		const dtH = Math.min(60_000, now - swap.lastSampleAt) / 3_600_000;
+		swap.energyWh += ((swap.lastWatts + watts) / 2) * dtH;
+	}
+	swap.lastSampleAt = now;
+	swap.lastWatts = watts;
+}
+
 async function refreshSwapMetrics(): Promise<void> {
 	if (!swap.base) return;
 	try {
 		parseSwapMetrics(await (await swapGet("/metrics")).text());
+		sampleEnergy();
 	} catch {
 		// server unreachable: keep the last values
 	}
 }
 
-/** Server-side token metrics of the most recent request (/api/metrics/activity, newest first). */
+/** Notices when llama-swap unloaded the session model (e.g. its ttl expired) so the panel can say so. */
+async function refreshSwapRunning(): Promise<void> {
+	if (!swap.base || swap.state !== "ready") return;
+	try {
+		const { running } = (await (await swapGet("/running")).json()) as { running?: { model: string }[] };
+		if (!(running ?? []).some((r) => r.model === swap.realId)) setSwapState("asleep");
+	} catch {
+		// optional
+	}
+}
+
+/** Server-side token metrics of the most recent request: a single row from /api/metrics/activity. */
 async function refreshSwapActivity(): Promise<void> {
 	if (!swap.base) return;
 	try {
-		const { data } = (await (await swapGet("/api/metrics/activity")).json()) as { data?: any[] };
+		const { data } = (await (await swapGet("/api/metrics/activity?limit=1")).json()) as { data?: any[] };
 		const t = data?.[0]?.tokens;
 		if (!t) return;
 		if (t.tokens_per_second > 0) swap.srvTps = t.tokens_per_second;
@@ -515,6 +601,7 @@ async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined
 	}
 	const id = model.id;
 	swap.modelId = id;
+	swap.realId = id;
 	setSwapState("checking");
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	swap.base = model.baseUrl.replace(/\/v1\/?$/, "");
@@ -524,6 +611,14 @@ async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined
 	};
 	void refreshSwapMetrics();
 	void refreshSwapActivity();
+	// an alias (e.g. "… - Instruct") runs another model: /running lists that one
+	try {
+		const { data } = (await (await swapGet("/v1/models")).json()) as { data?: any[] };
+		const entry = data?.find((m) => m.id === id);
+		if (entry?.meta?.llamaswap?.type === "alias" && entry.meta.llamaswap.modelID) swap.realId = entry.meta.llamaswap.modelID;
+	} catch {
+		// keep the id itself
+	}
 
 	// no answer within 400ms → the model isn't in VRAM and is being loaded
 	const slow = setTimeout(() => {
@@ -544,16 +639,83 @@ async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined
 	}
 }
 
+/* ── /magi-ui status: a report built from the last requests llama-swap recorded ── */
+
+interface ActivityRow {
+	timestamp: string;
+	model: string;
+	resp_status_code: number;
+	duration_ms: number;
+	tokens?: {
+		cache_tokens?: number;
+		input_tokens?: number;
+		output_tokens?: number;
+		prompt_per_second?: number;
+		tokens_per_second?: number;
+		draft_tokens?: number;
+		draft_acc_tokens?: number;
+	};
+}
+
+const ACTIVITY_REPORT_ROWS = 100;
+
+function activityReport(th: Theme, rows: ActivityRow[], total: number, now = Date.now()): string[] {
+	const dim = (s: string) => th.fg("dim", s);
+	const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+	const ago = (iso: string) => {
+		const m = Math.max(0, Math.round((now - Date.parse(iso)) / 60000));
+		return m < 60 ? `${m}m ago` : `${Math.floor(m / 60)}h ${m % 60}m ago`;
+	};
+	const out = [th.fg("accent", th.bold("LLAMA-SWAP STATUS")) + dim(` · last ${rows.length} of ${total} requests`)];
+	const byModel = new Map<string, ActivityRow[]>();
+	for (const r of rows) byModel.set(r.model, [...(byModel.get(r.model) ?? []), r]);
+
+	for (const [model, rs] of byModel) {
+		const t = rs.map((r) => r.tokens ?? {});
+		const sum = (k: keyof NonNullable<ActivityRow["tokens"]>) => t.reduce((a, x) => a + Math.max(0, x[k] ?? 0), 0);
+		const errors = rs.filter((r) => r.resp_status_code >= 400).length;
+		const gen = mean(t.map((x) => x.tokens_per_second ?? 0).filter((v) => v > 0));
+		const prompt = mean(t.map((x) => x.prompt_per_second ?? 0).filter((v) => v > 0));
+		const cached = sum("cache_tokens");
+		const input = sum("input_tokens");
+		const draft = sum("draft_tokens");
+		const accepted = sum("draft_acc_tokens");
+		const durations = rs.map((r) => r.duration_ms).sort((a, b) => a - b);
+		const p95 = durations[Math.min(durations.length - 1, Math.floor(durations.length * 0.95))] ?? 0;
+		out.push("", th.fg("text", th.bold(model)));
+		out.push(dim("  requests ") + th.fg("text", String(rs.length)) + dim(" · errors ") + th.fg(errors ? "error" : "success", String(errors)) + dim(` · last ${ago(rs[0]!.timestamp)}`));
+		out.push(
+			dim("  speed    ") +
+				th.fg("success", `gen ${gen.toFixed(1)} tok/s`) +
+				dim(" · ") +
+				th.fg("text", `prompt ${prompt.toFixed(1)} tok/s`) +
+				(draft ? dim(" · draft accepted ") + th.fg("text", `${Math.round((accepted / draft) * 100)}%`) : ""),
+		);
+		out.push(
+			dim("  tokens   ") +
+				th.fg("text", `in ${fmtTokens(input)} · cached ${fmtTokens(cached)}`) +
+				dim(` (hit ${cached + input ? Math.round((cached / (cached + input)) * 100) : 0}%)`) +
+				th.fg("text", ` · out ${fmtTokens(sum("output_tokens"))}`),
+		);
+		out.push(dim("  duration ") + th.fg("text", `avg ${fmtMs(mean(durations))} · p95 ${fmtMs(p95)} · max ${fmtMs(durations.at(-1) ?? 0)}`));
+	}
+	const slowest = [...rows].sort((a, b) => b.duration_ms - a.duration_ms)[0];
+	if (slowest) {
+		const st = slowest.tokens ?? {};
+		out.push("", dim("slowest ") + th.fg("warning", fmtMs(slowest.duration_ms)) + dim(` · ${slowest.model} · ${ago(slowest.timestamp)} · in ${fmtTokens((st.input_tokens ?? 0) + (st.cache_tokens ?? 0))} out ${fmtTokens(st.output_tokens ?? 0)}`));
+	}
+	return out;
+}
+
 /* ─────────────────────────────────────────────────────── side panel ── */
 
 const PANEL_WIDTH = MAGI_DIAGRAM_WIDTH + 2;
 
-/** Frames per deliberation cycle while thinking: units light up one by one, then consensus. */
-const CYCLE = 32;
-
 class MagiPanel implements Component {
 	private frame = 0;
 	private timer: ReturnType<typeof setInterval> | null = null;
+	/** The data rows change slowly: they are rebuilt at most twice a second, only the council animates every frame. */
+	private cache: { at: number; inner: number; compact: boolean; lines: string[] } | undefined;
 	/** git branch, provided by the footer (the only place pi exposes it). */
 	branch?: () => string | null | undefined;
 
@@ -568,7 +730,9 @@ class MagiPanel implements Component {
 		}, 125);
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.cache = undefined;
+	}
 
 	dispose(): void {
 		if (this.timer) clearInterval(this.timer);
@@ -588,12 +752,19 @@ class MagiPanel implements Component {
 		return b("│") + this.pad(content, inner) + b("│");
 	}
 
-	private sep(inner: number, label?: string): string {
+	private labelLine(inner: number, label: string, left: string, right: string, tone: ThemeColor): string {
 		const b = (s: string) => this.theme.fg("border", s);
-		if (!label) return b("├" + "─".repeat(inner) + "┤");
 		const text = ` ${truncateToWidth(label, inner - 4)} `;
 		const rest = Math.max(0, inner - visibleWidth(text) - 1);
-		return b("├─") + this.theme.fg("muted", text) + b("─".repeat(rest) + "┤");
+		return b(left + "─") + this.theme.fg(tone, text) + b("─".repeat(rest) + right);
+	}
+
+	private sep(inner: number, label: string): string {
+		return this.labelLine(inner, label, "├", "┤", "muted");
+	}
+
+	private centered(content: string, inner: number): string {
+		return this.frameLine(" ".repeat(Math.max(0, Math.floor((inner - visibleWidth(content)) / 2))) + content, inner);
 	}
 
 	private field(label: string, value: string, inner: number, tone: ThemeColor = "text"): string {
@@ -617,151 +788,113 @@ class MagiPanel implements Component {
 		});
 	}
 
-	/* ── MAGI triangle (thinking, verdicts, boot) or the golem (tools) ── */
+	/* ── top of the panel: the MAGI (flickering while working) or the golem (tools) ── */
 
 	private councilSection(inner: number): string[] {
 		const th = this.theme;
 		const f = this.frame;
 		const now = Date.now();
-		let title: string;
-		let body: string[];
+		const secs = (t: number) => `${secsSince(t, now)}s`;
+		const pulse = animating(now) ? pulseFrames(th)[f % 6]! : th.fg("dim", "◇");
 
 		const idle = state.phase === "idle";
-		const booting = idle && (swap.state === "checking" || swap.state === "loading");
-		const offline = idle && swap.state === "error";
-		const golem = state.phase === "tool" || (idle && now - state.lastFailAt < FAIL_FLASH_MS);
+		const fallen = now - state.lastFailAt < FAIL_FLASH_MS;
+		let title: string;
+		let titleTone: ThemeColor = "accent";
+		let body: string[];
+		let status: string;
 
-		if (golem) {
-			const fallen = now - state.lastFailAt < FAIL_FLASH_MS;
-			title = fallen
-				? `GOLEM FELL · MET · ${state.lastFailTool}`
-				: `GOLEM · EMET · ${state.toolName || "tool"} ${secsSince(state.phaseSince, now)}s`;
+		if (state.phase === "tool" || (idle && fallen)) {
+			title = fallen ? `GOLEM FELL · MET · ${state.lastFailTool}` : `GOLEM · ${state.toolName || "tool"} · ${secs(state.phaseSince)}`;
+			titleTone = fallen ? "error" : "warning";
 			body = this.golemArt(inner);
+			const target = (fallen ? state.lastFailTarget || state.lastFailTool : state.toolTarget || state.toolName) || "tool";
+			status = `${pulse} ${th.fg(fallen ? "error" : "text", truncateToWidth(target, inner - 4))}`;
 		} else {
-			let link: ThemeColor;
-			let hub: string;
-			let units: UnitView[];
-			const names = [...MAGI_UNITS];
+			let word: string;
+			let tone: ThemeColor;
+			let link: ThemeColor = "dim";
+			let hub = "─MAGI─";
+			let lit = (i: number) => flicker(f, i);
+			const breathing = ["─MAGI─", "━MAGI━"][f % 2]!;
 
-			if (state.compacting || now - state.rebornAt < REBIRTH_MS) {
-				// the seals break while the context is compacted; then the world is remade
-				const reborn = !state.compacting;
-				title = reborn
-					? "SEVENTH SEAL OPENED · REBORN"
-					: `SEALS · ${state.compactBy || "compacting"} ${secsSince(state.compactSince, now)}s`;
-				link = reborn ? "success" : f % 4 < 2 ? "warning" : "error";
-				hub = reborn ? "═MAGI═" : ["─SEAL─", "━SEAL━"][f % 2]!;
-				units = names.map((name, i) =>
-					reborn
-						? { name, status: "REBORN", tone: "success", lit: true }
-						: { name, status: "SEAL " + "◉".repeat(1 + ((Math.floor(f / 4) + i) % 3)), tone: "warning", lit: (f + i) % 3 !== 0 },
-				);
-			} else if (booting) {
-				// MAGI boot while llama-swap loads the model into VRAM: units come online one at a time.
-				const litCount = Math.floor(f / 6) % 4;
-				title = swap.state === "loading" ? `BOOT · LOADING MODEL ${secsSince(swap.since, now)}s` : "BOOT · CHECKING MODEL";
-				link = f % 4 < 2 ? "warning" : "dim";
-				hub = ["─MAGI─", "━MAGI━"][f % 2]!;
-				units = names.map((name, i) =>
-					i < litCount
-						? { name, status: "ONLINE", tone: "warning", lit: true }
-						: { name, status: i === litCount ? "BOOT" : "·····", tone: "warning", lit: i === litCount && f % 2 === 0 },
-				);
-			} else if (offline) {
+			if (state.compacting) {
+				title = `COMPACTING · ${state.compactBy || "context"} · ${secs(state.compactSince)}`;
+				[word, tone, link, hub, titleTone] = ["COMPACTING", "warning", "warning", ["─SEAL─", "━SEAL━"][f % 2]!, "warning"];
+			} else if (now - state.rebornAt < REBIRTH_MS) {
+				title = "SEVENTH SEAL OPENED";
+				[word, tone, link, hub, titleTone] = ["REBORN", "success", "success", "═MAGI═", "success"];
+				lit = () => true;
+			} else if (idle && (swap.state === "checking" || swap.state === "loading")) {
+				title = swap.state === "loading" ? `LOADING MODEL · ${secs(swap.since)}` : "CHECKING MODEL";
+				[word, tone, link, hub, titleTone] = ["LOADING", "warning", "warning", breathing, "warning"];
+			} else if (idle && swap.state === "error") {
 				title = "MAGI OFFLINE";
-				link = "error";
-				hub = "─ ╳ ──";
-				units = names.map((name) => ({ name, status: "OFFLINE", tone: "error", lit: f % 16 < 8 }));
+				[word, tone, link, hub, titleTone] = ["OFFLINE", "error", "error", "─ ╳ ──", "error"];
+				lit = () => f % 16 < 8;
+			} else if (idle && swap.state === "asleep") {
+				title = "MODEL ASLEEP · type to wake";
+				[word, tone, titleTone] = ["ASLEEP", "muted", "muted"];
+				lit = () => false;
 			} else if (idle && swap.state === "ready" && now - swap.since < 3000) {
 				title = swap.loadMs ? `MAGI ONLINE · ${fmtMs(swap.loadMs)}` : "MAGI ONLINE";
-				link = "success";
-				hub = "═MAGI═";
-				units = names.map((name) => ({ name, status: "ONLINE", tone: "success", lit: true }));
+				[word, tone, link, hub, titleTone] = ["ONLINE", "success", "success", "═MAGI═", "success"];
+				lit = () => true;
 			} else if (state.phase === "thinking") {
-				// Deliberation: each unit lights up in turn until all three agree, then the cycle restarts.
-				const litCount = Math.min(3, Math.floor((f % CYCLE) / 8));
-				const consensus = litCount === 3;
-				title = consensus ? "CONSENSUS" : `DELIBERATION ${secsSince(state.phaseSince, now)}s`;
-				link = consensus ? (f % 4 < 2 ? "warning" : "accent") : "accent";
-				const dots = ["·    ", " ·   ", "  ·  ", "   · ", "    ·"];
-				units = names.map((name, i) => {
-					if (i < litCount) return { name, status: consensus ? "AGREE" : MAGI_TASKS[i]!, tone: consensus ? "warning" : "accent", lit: true };
-					// the unit being processed right now flickers
-					return { name, status: dots[(f + i) % dots.length]!, tone: "accent", lit: i === litCount && f % 2 === 0 };
-				});
-				hub = consensus ? "◆MAGI◆" : ["─MAGI─", "━MAGI━"][f % 2]!;
+				title = `THINKING · ${secs(state.phaseSince)}`;
+				[word, tone, link, hub] = ["THINKING", "accent", "accent", breathing];
 			} else if (state.phase === "responding") {
-				title = "VERDICT: APPROVED";
-				link = "success";
-				hub = "═MAGI═";
-				units = names.map((name) => ({ name, status: "APPROVE", tone: "success", lit: true }));
+				const tps = liveTps();
+				title = `RESPONDING${tps ? ` · ${tps.toFixed(1)} tok/s` : ""}`;
+				[word, tone, link, hub, titleTone] = ["RESPONDING", "success", "success", breathing, "success"];
 			} else {
-				title = "MAGI · AWAITING QUESTION";
-				link = "dim";
-				hub = "─MAGI─";
-				units = names.map((name) => ({ name, status: "STANDBY", tone: "success", lit: false }));
+				title = "STANDBY";
+				[word, tone, titleTone] = ["STANDBY", "muted", "muted"];
+				lit = () => false;
 			}
+
+			const units = MAGI_UNITS.map((name, i) => ({ name, status: word, tone, lit: lit(i) }));
 			body = magiDiagram(th, units[1]!, units[2]!, units[0]!, link, hub);
+			const c = state.lastCouncil;
+			status = c
+				? `${pulse} ${th.fg("dim", "COUNCIL ")}${th.fg(voteTone(c.verdict), `${c.verdict ?? "NO QUORUM"} ${c.tally}/3`)}`
+				: `${pulse} ${th.fg("dim", "COUNCIL · /magi")}`;
 		}
 
-		const out = [this.sep(inner, title)];
-		for (const l of body) out.push(this.frameLine(l, inner));
+		return [this.labelLine(inner, title, "┌", "┐", titleTone), ...body.map((l) => this.frameLine(l, inner)), this.centered(status, inner)];
+	}
 
-		// status row: what the agent is doing
-		const pulse = animating(now) ? pulseFrames(th)[f % 6]! : th.fg("dim", "◇");
-		let activity: string;
-		if (state.compacting) activity = th.fg("warning", "COMPACTING");
-		else if (state.phase === "tool") activity = th.fg("warning", "TOOL CALL");
-		else if (state.phase === "thinking") activity = th.fg("accent", "THINKING");
-		else if (state.phase === "responding") activity = th.fg("success", "RESPONDING");
-		else if (booting) activity = th.fg("warning", "LOADING MODEL");
-		else if (offline) activity = th.fg("error", "SERVER OFFLINE");
-		else activity = th.fg("dim", "STANDBY");
-		const status = `${pulse} ${activity}`;
-		out.push(this.frameLine(" ".repeat(Math.max(0, Math.floor((inner - visibleWidth(status)) / 2))) + status, inner));
+	/* ── data rows ── */
+
+	private sessionRows(inner: number, compact: boolean): string[] {
+		const out = [this.sep(inner, "SESSION")];
+		const model = liveCtx?.model;
+		out.push(this.field("MODEL", truncateToWidth(model?.id ?? "—", inner - 11), inner, "text"));
+		if (!compact) out.push(this.field("PROVIDER", truncateToWidth(String(model?.provider ?? "—"), inner - 11), inner, "muted"));
+		out.push(this.field("THINKING", liveCtx?.thinkingLevel ?? "off", inner, "muted"));
+		if (!compact) {
+			const cwd = (liveCtx?.cwd ?? "").split("/").filter(Boolean).pop() ?? "—";
+			out.push(this.field("PROJECT", truncateToWidth(cwd, inner - 11), inner, "muted"));
+			const branch = this.branch?.();
+			if (branch) out.push(this.field("BRANCH", truncateToWidth(branch, inner - 11), inner, "muted"));
+		}
 		return out;
 	}
 
-	render(width: number): string[] {
+	private telemetryRows(inner: number, compact: boolean): string[] {
 		const th = this.theme;
-		const inner = Math.max(24, width - 2);
-		const b = (s: string) => th.fg("border", s);
-		const out: string[] = [];
-
-		const title = " MAGI // SESSION MONITOR ";
-		const fill = Math.max(0, inner - visibleWidth(title) - 1);
-		out.push(b("┌─") + th.fg("accent", title) + b("─".repeat(fill) + "┐"));
-
-		out.push(...this.councilSection(inner));
-
-		// session data
-		out.push(this.sep(inner, "SESSION"));
-		const model = liveCtx?.model;
-		out.push(this.field("MODEL", truncateToWidth(model?.id ?? "—", inner - 11), inner, "text"));
-		out.push(this.field("PROVIDER", truncateToWidth(String(model?.provider ?? "—"), inner - 11), inner, "muted"));
-		out.push(this.field("THINKING", liveCtx?.thinkingLevel ?? "off", inner, "muted"));
-		const cwd = (liveCtx?.cwd ?? "").split("/").filter(Boolean).pop() ?? "—";
-		out.push(this.field("PROJECT", truncateToWidth(cwd, inner - 11), inner, "muted"));
-		const branch = this.branch?.();
-		if (branch) out.push(this.field("BRANCH", truncateToWidth(branch, inner - 11), inner, "muted"));
-
-		// telemetry
-		out.push(this.sep(inner, "TELEMETRY"));
-		const stats = tokenStats();
-		out.push(
-			this.frameLine(
-				` ${th.fg("dim", "TURNS".padEnd(9))}${th.fg("text", String(state.turns))}`,
-				inner,
-			),
-		);
-		out.push(
-			this.frameLine(
-				` ${th.fg("dim", "TOKENS".padEnd(9))}${th.fg("success", "↑" + fmtTokens(stats.input))} ${th.fg("warning", "↓" + fmtTokens(stats.output))}`,
-				inner,
-			),
-		);
-		if (stats.cacheRead) out.push(this.field("CACHE", fmtTokens(stats.cacheRead), inner, "muted"));
-		if (stats.cost) out.push(this.field("COST", `$${stats.cost.toFixed(3)}`, inner, "muted"));
+		const out = [this.sep(inner, "TELEMETRY")];
+		if (!compact) {
+			out.push(this.frameLine(` ${th.fg("dim", "TURNS".padEnd(9))}${th.fg("text", String(state.turns))}`, inner));
+			out.push(
+				this.frameLine(
+					` ${th.fg("dim", "TOKENS".padEnd(9))}${th.fg("success", "↑" + fmtTokens(tokens.input))} ${th.fg("warning", "↓" + fmtTokens(tokens.output))}`,
+					inner,
+				),
+			);
+			if (tokens.cacheRead) out.push(this.field("CACHE", fmtTokens(tokens.cacheRead), inner, "muted"));
+			if (tokens.cost) out.push(this.field("COST", `$${tokens.cost.toFixed(3)}`, inner, "muted"));
+		}
 
 		// SYNC: the golem's obedience = tool success rate (CHESED ✓ / GEBURAH ✗)
 		const sync = syncPercent();
@@ -785,12 +918,15 @@ class MagiPanel implements Component {
 		const usage = liveCtx?.getContextUsage?.();
 		const percent = usage?.percent ?? 0;
 		out.push(this.frameLine(` ${th.fg("dim", "SEALS".padEnd(9))}${renderSeals(th, percent)} ${th.fg(usageTone(percent), `${percent.toFixed(0)}%`)}`, inner));
-		if (usage?.contextWindow) {
+		if (!compact && usage?.contextWindow) {
 			out.push(this.field("CONTEXT", `${usage.tokens == null ? "?" : fmtTokens(usage.tokens)} / ${fmtTokens(usage.contextWindow)}`, inner, "muted"));
 		}
+		return out;
+	}
 
-		// performance
-		out.push(this.sep(inner, "PERFORMANCE"));
+	private performanceRows(inner: number, compact: boolean): string[] {
+		const th = this.theme;
+		const out = [this.sep(inner, "PERFORMANCE")];
 		const live = state.phase !== "idle" && perf.chars > 0;
 		// idle: prefer the value measured by llama-swap itself
 		const tps = live ? liveTps() : swap.srvTps || perf.tps;
@@ -800,6 +936,7 @@ class MagiPanel implements Component {
 				inner,
 			),
 		);
+		if (compact) return out;
 		if (swap.srvPps) out.push(this.field("PROMPT/S", swap.srvPps.toFixed(1), inner, "muted"));
 		// llama-swap's input_tokens are the prompt tokens processed outside the cache
 		const promptTotal = swap.cacheTokens + swap.inputTokens;
@@ -812,46 +949,68 @@ class MagiPanel implements Component {
 		out.push(this.field("DURATION", perf.lastMs ? fmtMs(perf.lastMs) : "—", inner, "muted"));
 		const up = Math.floor((Date.now() - sessionStart) / 60000);
 		out.push(this.field("UPTIME", `${Math.floor(up / 60)}h ${String(up % 60).padStart(2, "0")}m`, inner, "muted"));
+		return out;
+	}
 
-		// llama-swap server
-		if (swap.base) {
-			out.push(this.sep(inner, "LLAMA-SWAP"));
-			const st =
-				swap.state === "ready"
-					? th.fg("success", "IN VRAM")
+	private swapRows(inner: number, compact: boolean): string[] {
+		if (!swap.base) return [];
+		const th = this.theme;
+		const out = [this.sep(inner, "LLAMA-SWAP")];
+		const st =
+			swap.state === "ready"
+				? th.fg("success", "IN VRAM")
+				: swap.state === "asleep"
+					? th.fg("muted", "ASLEEP")
 					: swap.state === "error"
 						? th.fg("error", "OFFLINE")
 						: th.fg("warning", swap.state === "loading" ? `LOADING ${secsSince(swap.since)}s` : "CHECKING");
-			const load = swap.state === "ready" && swap.loadMs ? th.fg("dim", ` load ${fmtMs(swap.loadMs)}`) : "";
-			out.push(this.frameLine(` ${th.fg("dim", "STATUS".padEnd(9))}${st}${load}`, inner));
-			if (swap.state === "error") out.push(this.frameLine(" " + th.fg("error", swap.error), inner));
-			const gib = (n: number) => n / 2 ** 30;
-			for (const [i, g] of swap.gpus.entries()) {
-				const pct = g.memTotal ? (g.memUsed / g.memTotal) * 100 : 0;
-				out.push(
-					this.frameLine(
-						` ${th.fg("dim", `VRAM${i}`.padEnd(9))}${bar(th, Math.round(pct / 10), 10, "accent")} ${th.fg("muted", `${gib(g.memUsed).toFixed(1)}/${Math.round(gib(g.memTotal))}G`)}`,
-						inner,
-					),
-				);
-				out.push(
-					this.frameLine(
-						` ${th.fg("dim", `GPU${i}`.padEnd(9))}${th.fg(g.util > 0 ? "accent" : "muted", `${Math.round(g.util)}%`.padEnd(6))}${th.fg(g.temp >= 80 ? "error" : "muted", `${Math.round(g.temp)}°C`.padEnd(7))}${th.fg("muted", `${Math.round(g.power)}W`)}`,
-						inner,
-					),
-				);
-			}
-			if (swap.ramTotal) out.push(this.field("RAM", `${gib(swap.ramUsed).toFixed(1)} / ${Math.round(gib(swap.ramTotal))}G`, inner, "muted"));
+		const load = swap.state === "ready" && swap.loadMs ? th.fg("dim", ` load ${fmtMs(swap.loadMs)}`) : "";
+		out.push(this.frameLine(` ${th.fg("dim", "STATUS".padEnd(9))}${st}${load}`, inner));
+		if (compact) return out;
+		if (swap.state === "error") out.push(this.frameLine(" " + th.fg("error", swap.error), inner));
+		const gib = (n: number) => n / 2 ** 30;
+		for (const [i, g] of swap.gpus.entries()) {
+			const pct = g.memTotal ? (g.memUsed / g.memTotal) * 100 : 0;
+			out.push(
+				this.frameLine(
+					` ${th.fg("dim", `VRAM${i}`.padEnd(9))}${bar(th, Math.round(pct / 10), 10, "accent")} ${th.fg("muted", `${gib(g.memUsed).toFixed(1)}/${Math.round(gib(g.memTotal))}G`)}`,
+					inner,
+				),
+			);
+			out.push(
+				this.frameLine(
+					` ${th.fg("dim", `GPU${i}`.padEnd(9))}${th.fg(g.util > 0 ? "accent" : "muted", `${Math.round(g.util)}%`.padEnd(6))}${th.fg(g.temp >= 80 ? "error" : "muted", `${Math.round(g.temp)}°C`.padEnd(7))}${th.fg("muted", `${Math.round(g.power)}W`)}`,
+					inner,
+				),
+			);
 		}
+		if (swap.ramTotal) out.push(this.field("RAM", `${gib(swap.ramUsed).toFixed(1)} / ${Math.round(gib(swap.ramTotal))}G`, inner, "muted"));
+		if (swap.gpus.length) {
+			const kwh = swap.energyWh / 1000;
+			const cost = ui.kwhPrice !== undefined ? ` · ${(kwh * ui.kwhPrice).toFixed(2)}€` : "";
+			out.push(this.field("ENERGY", `${kwh.toFixed(3)} kWh${cost}`, inner, "muted"));
+		}
+		return out;
+	}
 
-		out.push(b("└" + "─".repeat(inner) + "┘"));
-		return out.map((l) => truncateToWidth(l, width));
+	render(width: number): string[] {
+		const inner = Math.max(24, width - 2);
+		const now = Date.now();
+		if (!this.cache || this.cache.inner !== inner || this.cache.compact !== ui.compact || now - this.cache.at > 500) {
+			const c = ui.compact;
+			this.cache = {
+				at: now,
+				inner,
+				compact: c,
+				lines: [...this.sessionRows(inner, c), ...this.telemetryRows(inner, c), ...this.performanceRows(inner, c), ...this.swapRows(inner, c)],
+			};
+		}
+		const bottom = this.theme.fg("border", "└" + "─".repeat(inner) + "┘");
+		return [...this.councilSection(inner), ...this.cache.lines, bottom].map((l) => truncateToWidth(l, width));
 	}
 }
 
 /* ─────────────────────────────────────────────── MAGI deliberation ── */
-
-type Vote = "APPROVE" | "CONDITIONAL" | "REJECT";
 
 function voteTone(v: string | null | undefined): "success" | "warning" | "error" {
 	return v === "APPROVE" ? "success" : v === "CONDITIONAL" ? "warning" : "error";
@@ -925,13 +1084,13 @@ interface Deliberation {
 	tally: number;
 }
 
-/* ── config: ~/.pi/agent/magi.json → { "MELCHIOR": { "model": "provider/id", "thinking": "low" }, … } ── */
+/* ── config: ~/.pi/agent/magi.json → { "MELCHIOR": { "model": "provider/id", "thinking": "low" }, …, "ui": { "compact": true, "kwhPrice": 0.3 } } ── */
 
 interface MagiUnitConfig {
 	model?: string;
 	thinking?: string;
 }
-type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>>;
+type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & { ui?: { compact?: boolean; kwhPrice?: number } };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
 
@@ -941,6 +1100,10 @@ function loadMagiConfig(): MagiConfig {
 	} catch {
 		return {};
 	}
+}
+
+function saveMagiConfig(cfg: MagiConfig): void {
+	writeFileSync(MAGI_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
 }
 
 function parseVote(text: string): Vote {
@@ -981,6 +1144,22 @@ function conversationExcerpt(ctx: ExtensionContext, maxChars = 6000): string {
 	return joined.length > maxChars ? "…" + joined.slice(-maxChars) : joined;
 }
 
+const REVIEW_MAX_CHARS = 24_000;
+
+/** The pending changes for /magi review: tracked changes against HEAD plus the names of untracked files. */
+async function pendingChanges(cwd: string): Promise<{ diff: string; untracked: string[] }> {
+	const git = (args: string[]) => promisify(execFile)("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 }).then((r) => r.stdout);
+	let diff: string;
+	try {
+		diff = await git(["diff", "HEAD"]);
+	} catch {
+		// no commits yet: staged + unstaged
+		diff = (await git(["diff", "--cached"])) + (await git(["diff"]));
+	}
+	const untracked = (await git(["ls-files", "--others", "--exclude-standard"]).catch(() => "")).split("\n").filter(Boolean);
+	return { diff, untracked };
+}
+
 /** Common function words per language, used to name the reply language explicitly. */
 const LANGUAGE_HINTS: readonly [string, readonly string[]][] = [
 	["Italian", ["il", "lo", "la", "gli", "di", "che", "per", "non", "una", "con", "sono", "come", "perché", "è", "dovrei", "meglio", "mettiamo", "questo", "quale"]],
@@ -1004,13 +1183,13 @@ function guessLanguage(text: string): string | undefined {
 }
 
 /** The user message each MAGI receives. The language reminder sits after the question, where the model reads it last. */
-function councilPrompt(project: string, excerpt: string, question: string): string {
+function councilPrompt(project: string, context: string, question: string, contextLabel = "Recent conversation (context only, may be empty)"): string {
 	const lang = guessLanguage(question);
 	const reminder = lang
 		? `(Write your whole answer in ${lang}, even if technical terms in the question are English.)`
 		: "(Write your whole answer in the language of this question, even if technical terms in it are English.)";
 	return (
-		`Project: ${project}\n\nRecent conversation (context only, may be empty):\n<conversation>\n${excerpt}\n</conversation>\n\n` +
+		`Project: ${project}\n\n${contextLabel}:\n<context>\n${context}\n</context>\n\n` +
 		`Question for the MAGI:\n${question}\n\n${reminder}`
 	);
 }
@@ -1089,11 +1268,10 @@ function buildDeliberationView(
 			out.push(row(" " + theme.fg("muted", question)));
 			out.push(row(""));
 
-			// Pending units flicker until their model answers.
-			const spin = ["◐", "◓", "◑", "◒"][tick % 4]!;
+			// Pending units flicker at random until their model answers.
 			const units: UnitView[] = MAGI_UNITS.map((name, i) => {
 				const o = opinions[i];
-				if (!o) return { name, status: `${spin} ···`, tone: "accent", lit: tick % 2 === 0 };
+				if (!o) return { name, status: "···", tone: "accent", lit: flicker(tick, i) };
 				if (!o.vote) return { name, status: "ERROR", tone: "error", lit: true };
 				return { name, status: o.vote === "CONDITIONAL" ? "COND." : o.vote, tone: voteTone(o.vote), lit: true };
 			});
@@ -1131,6 +1309,29 @@ function buildDeliberationView(
 	};
 }
 
+/** A read-only boxed report (used by /magi-ui status); any key closes it. */
+function buildReportView(theme: Theme, lines: string[], close: () => void) {
+	return {
+		render(width: number): string[] {
+			const inner = Math.max(40, Math.min(width - 2, 96));
+			const row = (s: string) => {
+				const t = truncateToWidth(" " + s, inner);
+				return theme.fg("accent", "│") + t + " ".repeat(Math.max(0, inner - visibleWidth(t))) + theme.fg("accent", "│");
+			};
+			return [
+				theme.fg("accent", "┌" + "─".repeat(inner) + "┐"),
+				...lines.map(row),
+				theme.fg("accent", "└" + "─".repeat(inner) + "┘"),
+				theme.fg("dim", " any key: close"),
+			].map((l) => truncateToWidth(l, width));
+		},
+		handleInput(_data: string) {
+			close();
+		},
+		invalidate() {},
+	};
+}
+
 async function configureMagi(ctx: ExtensionContext): Promise<void> {
 	const cfg = loadMagiConfig();
 	const pool = ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable();
@@ -1145,7 +1346,7 @@ async function configureMagi(ctx: ExtensionContext): Promise<void> {
 		}
 		cfg[magi.unit] = { ...cfg[magi.unit], model: pick === SESSION ? undefined : pick };
 	}
-	writeFileSync(MAGI_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+	saveMagiConfig(cfg);
 	ctx.ui.notify(`MAGI config saved to ${MAGI_CONFIG_PATH}`, "info");
 }
 
@@ -1154,11 +1355,12 @@ async function configureMagi(ctx: ExtensionContext): Promise<void> {
 /**
  * The footer's left side, one animation per real state of the agent:
  *  - seals breaking / seventh seal opened → context compaction
- *  - golem EMET / MET                     → tool running / tool failed
+ *  - golem EMET / MET                     → tool running (with its file or command) / tool failed
  *  - light pulsing in the upper triad     → thinking
  *  - light descending to Malkuth          → streaming the answer
  *  - light ascending from Malkuth         → loading the model into VRAM
- *  - at rest in Malkuth                   → idle
+ *  - the sixth seal                       → context close to compaction
+ *  - asleep / at rest in Malkuth          → model unloaded / idle
  */
 function footerLeft(th: Theme, now = Date.now()): string {
 	const dim = (s: string) => th.fg("dim", s);
@@ -1190,14 +1392,17 @@ function footerLeft(th: Theme, now = Date.now()): string {
 		const tally = th.fg("success", ` CHESED ✓${state.toolOk}`) + th.fg(state.toolFail ? "error" : "dim", ` GEBURAH ✗${state.toolFail}`);
 		const syncText = sync === null ? "" : dim(" · sync ") + th.fg(syncTone(sync), `${sync.toFixed(0)}%`);
 		if (now - state.lastFailAt < FAIL_FLASH_MS) {
-			return th.fg("error", "✗ GOLEM · MET") + dim(" · ") + th.fg("error", `${state.lastFailTool} failed`) + dim(" ·") + tally + syncText;
+			const target = state.lastFailTarget ? dim(" ") + th.fg("error", truncateToWidth(state.lastFailTarget, 40)) : "";
+			return th.fg("error", "✗ GOLEM · MET") + dim(" · ") + th.fg("error", `${state.lastFailTool} failed`) + target + dim(" ·") + tally + syncText;
 		}
 		const hammer = ["▚", "▞"][step % 2]!;
+		const target = state.toolTarget ? dim(" ") + th.fg("muted", truncateToWidth(state.toolTarget, 40)) : "";
 		return (
 			th.fg("accent", `${hammer} GOLEM · `) +
 			th.bold(th.fg("warning", "EMET")) +
 			dim(" · ") +
 			th.fg("text", state.toolName || "tool") +
+			target +
 			dim(` ${secsSince(state.phaseSince, now)}s ·`) +
 			tally +
 			syncText
@@ -1233,6 +1438,19 @@ function footerLeft(th: Theme, now = Date.now()): string {
 			dim(` · loading model into VRAM ${secsSince(swap.since, now)}s`)
 		);
 	}
+	const percent = liveCtx?.getContextUsage?.()?.percent ?? 0;
+	if (percent >= SIXTH_SEAL_PERCENT) {
+		const cmd = state.hasSmartCompact ? "/smart-compact" : "/compact";
+		return (
+			th.fg(step % 4 < 2 ? "error" : "warning", "⚠ SIXTH SEAL") +
+			dim(` · context ${percent.toFixed(0)}% · compact now with `) +
+			th.fg("text", cmd) +
+			dim(" before it happens mid-task")
+		);
+	}
+	if (swap.state === "asleep") {
+		return th.fg("muted", "○ MALKUTH") + dim(" · model asleep in llama-swap · type to wake it");
+	}
 	const last = state.lastRunMs ? ` · last run ${fmtMs(state.lastRunMs)}` : "";
 	return th.fg("success", "○ ") + th.fg("muted", "MALKUTH") + dim(` · the kingdom · at rest${last}`);
 }
@@ -1265,14 +1483,28 @@ function buildFooter(tui: TUI, theme: Theme, footerData: any) {
 
 /* ───────────────────────────────────────────────────────── extension ── */
 
+const BUSY_POLL_MS = 3_000;
+const IDLE_POLL_MS = 30_000;
+
+/** Window title: "π - Magi - <working directory>", prefixed with ✓ after a long run until you are back. */
+function windowTitle(cwd: string, done = false): string {
+	const home = homedir();
+	const dir = cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
+	return `${done ? "✓ " : ""}π - Magi - ${dir}`;
+}
+
 export default function (pi: ExtensionAPI) {
 	let chrome = true;
 	let panelEnabled = true;
 	let tuiRef: TUI | undefined;
 	let panelHandle: OverlayHandle | undefined;
 	let panel: MagiPanel | undefined;
+	let titleDone = false;
 
-	const repaint = () => tuiRef?.requestRender();
+	const repaint = () => {
+		panel?.invalidate();
+		tuiRef?.requestRender();
+	};
 
 	let footerDataRef: any;
 	let wrappedRoot: any; // pi's original root, when the panel is a fullscreen column
@@ -1347,7 +1579,7 @@ export default function (pi: ExtensionAPI) {
 			return buildFooter(tui, theme, footerData);
 		});
 		ctx.ui.setWorkingIndicator({ frames: pulseFrames(ctx.ui.theme), intervalMs: 110 });
-		ctx.ui.setTitle("MAGI");
+		ctx.ui.setTitle(windowTitle(ctx.cwd, titleDone));
 	};
 
 	pi.registerEntryRenderer("magi-verdict", (entry: any, _options: any, theme: Theme) => {
@@ -1371,15 +1603,45 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	let metricsTimer: ReturnType<typeof setInterval> | undefined;
+	let unsubscribeInput: (() => void) | undefined;
+	let lastPoll = 0;
 
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
+		recountSession(ctx);
+		state.hasSmartCompact = pi.getCommands().some((c) => c.name.replace(/^\//, "") === "smart-compact");
+		const cfg = loadMagiConfig();
+		ui.compact = cfg.ui?.compact ?? false;
+		ui.kwhPrice = cfg.ui?.kwhPrice;
 		if (ctx.mode !== "tui") return;
 		applyChrome(ctx);
-		// load the model into VRAM now (animated in the panel and footer) and keep GPU stats fresh
+		// load the model into VRAM now (animated in the panel and footer)
 		void preloadModel(ctx);
-		metricsTimer ??= setInterval(() => void refreshSwapMetrics(), 3000);
+		// GPU stats every 3s while something happens, every 30s when idle
+		metricsTimer ??= setInterval(() => {
+			const now = Date.now();
+			if (!animating(now) && now - lastPoll < IDLE_POLL_MS) return;
+			lastPoll = now;
+			void refreshSwapMetrics()
+				.then(refreshSwapRunning)
+				.then(repaint);
+		}, BUSY_POLL_MS);
 		metricsTimer.unref?.();
+		// back at the keyboard: clear the ✓ from the title, wake a model llama-swap unloaded
+		unsubscribeInput ??= ctx.ui.onTerminalInput(() => {
+			if (titleDone) {
+				titleDone = false;
+				ctx.ui.setTitle(windowTitle(ctx.cwd));
+			}
+			if (swap.state === "asleep" && liveCtx) void preloadModel(liveCtx);
+			return undefined;
+		});
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		liveCtx = ctx;
+		recountSession(ctx);
+		repaint();
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -1390,6 +1652,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		clearInterval(metricsTimer);
 		metricsTimer = undefined;
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
 		hidePanel();
 	});
 
@@ -1427,20 +1691,23 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", async (event) => {
-		if (event.message.role !== "assistant" || !perf.start) return;
+		if (event.message.role !== "assistant") return;
 		const m = event.message as AssistantMessage;
-		const end = Date.now();
-		perf.lastMs = end - perf.start;
-		if (perf.first) {
-			perf.ttft = perf.first - perf.start;
-			const genS = (end - perf.first) / 1000;
-			const out = m.usage?.output || perf.chars / 4;
-			if (genS > 0.05 && out) {
-				perf.tps = out / genS;
-				perf.peakTps = Math.max(perf.peakTps, perf.tps);
+		addUsage(m);
+		if (perf.start) {
+			const end = Date.now();
+			perf.lastMs = end - perf.start;
+			if (perf.first) {
+				perf.ttft = perf.first - perf.start;
+				const genS = (end - perf.first) / 1000;
+				const out = m.usage?.output || perf.chars / 4;
+				if (genS > 0.05 && out) {
+					perf.tps = out / genS;
+					perf.peakTps = Math.max(perf.peakTps, perf.tps);
+				}
 			}
+			perf.start = 0;
 		}
-		perf.start = 0;
 		repaint();
 		// llama-swap records the request once it completes
 		setTimeout(() => void refreshSwapActivity().then(repaint), 300);
@@ -1450,6 +1717,7 @@ export default function (pi: ExtensionAPI) {
 		liveCtx = ctx;
 		setPhase("tool");
 		state.toolName = event.toolName ?? "";
+		state.toolTarget = toolTarget(event.args);
 		repaint();
 	});
 
@@ -1459,6 +1727,7 @@ export default function (pi: ExtensionAPI) {
 			state.toolFail++;
 			state.lastFailAt = Date.now();
 			state.lastFailTool = event.toolName ?? "tool";
+			state.lastFailTarget = state.toolTarget;
 		} else {
 			state.toolOk++;
 		}
@@ -1471,18 +1740,24 @@ export default function (pi: ExtensionAPI) {
 		state.runStart = 0;
 		setPhase("idle");
 		state.toolName = "";
-		if (ctx.mode === "tui" && chrome) ctx.ui.setWorkingMessage();
+		state.toolTarget = "";
+		if (ctx.mode === "tui" && chrome) {
+			ctx.ui.setWorkingMessage();
+			// a long run just finished: mark the window title until you touch the keyboard
+			if (state.lastRunMs > DONE_TITLE_AFTER_MS) {
+				titleDone = true;
+				ctx.ui.setTitle(windowTitle(ctx.cwd, true));
+			}
+		}
 		repaint();
 	});
 
 	// The seven seals: compaction breaks them, and the context is reborn.
 	// When pi-smart-compact is installed it owns the compaction; this theme only watches and names it.
-	const hasSmartCompact = () => pi.getCommands().some((c) => c.name.replace(/^\//, "") === "smart-compact");
-
 	pi.on("session_before_compact", async () => {
 		state.compacting = true;
 		state.compactSince = Date.now();
-		state.compactBy = hasSmartCompact() ? "smart-compact" : "pi native";
+		state.compactBy = state.hasSmartCompact ? "smart-compact" : "pi native";
 		repaint();
 	});
 
@@ -1490,7 +1765,7 @@ export default function (pi: ExtensionAPI) {
 		state.compacting = false;
 		state.rebornAt = Date.now();
 		// fromExtension: an extension supplied the summary; otherwise pi's own compactor did (e.g. smart-compact fell back)
-		state.compactBy = event.fromExtension ? (hasSmartCompact() ? "smart-compact" : "extension") : "pi native";
+		state.compactBy = event.fromExtension ? (state.hasSmartCompact ? "smart-compact" : "extension") : "pi native";
 		repaint();
 	});
 
@@ -1499,52 +1774,82 @@ export default function (pi: ExtensionAPI) {
 		repaint();
 	});
 
+	/** Runs the council on a question with some context, shows the deliberation, stores the verdict. */
+	async function runCouncil(ctx: ExtensionContext, question: string, context: string, contextLabel?: string): Promise<void> {
+		const cfg = loadMagiConfig();
+		const project = (ctx.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
+		const prompt = councilPrompt(project, context, question, contextLabel);
+
+		const controller = new AbortController();
+		const opinions: (MagiOpinion | undefined)[] = MAGI.map(() => undefined);
+		let finished = false;
+		const all = Promise.all(
+			MAGI.map((_, i) =>
+				askMagi(ctx, i, prompt, cfg, controller.signal).then((o) => {
+					opinions[i] = o;
+					return o;
+				}),
+			),
+		).finally(() => {
+			finished = true;
+		});
+
+		if (ctx.mode === "tui") {
+			const cancelled = await ctx.ui.custom<boolean>((tui, theme, _keys, done) =>
+				buildDeliberationView(tui, theme, question, opinions, () => finished, done),
+			);
+			if (cancelled) {
+				controller.abort();
+				ctx.ui.notify("MAGI deliberation aborted", "warning");
+				return;
+			}
+		}
+
+		const final = await all;
+		const { verdict, tally } = tallyVerdict(final.map((o) => o.vote));
+		pi.appendEntry("magi-verdict", { question, opinions: final, verdict, tally } satisfies Deliberation);
+		state.lastCouncil = { verdict, tally, question };
+		repaint();
+	}
+
 	pi.registerCommand("magi", {
-		description: "Ask the three MAGI (pragmatist, guardian, visionary); /magi config assigns a model to each",
+		description: "Ask the three MAGI (pragmatist, guardian, visionary); /magi review [focus] judges the git diff; /magi config assigns models",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (arg === "config") return configureMagi(ctx);
 
-			const question = arg || (await ctx.ui.input("Question for the MAGI:", "should we …?"))?.trim() || "";
-			if (!question) return;
-
-			const cfg = loadMagiConfig();
-			const project = (ctx.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
-			const prompt = councilPrompt(project, conversationExcerpt(ctx), question);
-
-			const controller = new AbortController();
-			const opinions: (MagiOpinion | undefined)[] = MAGI.map(() => undefined);
-			let finished = false;
-			const all = Promise.all(
-				MAGI.map((_, i) =>
-					askMagi(ctx, i, prompt, cfg, controller.signal).then((o) => {
-						opinions[i] = o;
-						return o;
-					}),
-				),
-			).finally(() => {
-				finished = true;
-			});
-
-			if (ctx.mode === "tui") {
-				const cancelled = await ctx.ui.custom<boolean>((tui, theme, _keys, done) =>
-					buildDeliberationView(tui, theme, question, opinions, () => finished, done),
-				);
-				if (cancelled) {
-					controller.abort();
-					ctx.ui.notify("MAGI deliberation aborted", "warning");
+			if (arg === "review" || arg.startsWith("review ")) {
+				const focus = arg.slice("review".length).trim();
+				let changes: { diff: string; untracked: string[] };
+				try {
+					changes = await pendingChanges(ctx.cwd);
+				} catch {
+					ctx.ui.notify("MAGI review needs a git repository", "error");
 					return;
 				}
+				if (!changes.diff.trim() && !changes.untracked.length) {
+					ctx.ui.notify("Nothing to review: no changes against HEAD", "info");
+					return;
+				}
+				const diff =
+					changes.diff.length > REVIEW_MAX_CHARS
+						? changes.diff.slice(0, REVIEW_MAX_CHARS) + `\n… diff truncated (${changes.diff.length} chars in total)`
+						: changes.diff;
+				const untracked = changes.untracked.length ? `\n\nUntracked files (content not shown):\n${changes.untracked.join("\n")}` : "";
+				const question = focus
+					? `Review these pending changes before committing, focusing on: ${focus}`
+					: "Review these pending changes before committing: are they ready to commit, and what must change first?";
+				return runCouncil(ctx, question, "```diff\n" + diff + "\n```" + untracked, "Pending changes (git diff HEAD)");
 			}
 
-			const final = await all;
-			const { verdict, tally } = tallyVerdict(final.map((o) => o.vote));
-			pi.appendEntry("magi-verdict", { question, opinions: final, verdict, tally } satisfies Deliberation);
+			const question = arg || (await ctx.ui.input("Question for the MAGI:", "should we …?"))?.trim() || "";
+			if (!question) return;
+			return runCouncil(ctx, question, conversationExcerpt(ctx));
 		},
 	});
 
 	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage chrome and side panel (on|off|panel)",
+		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status)",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
@@ -1554,6 +1859,36 @@ export default function (pi: ExtensionAPI) {
 				if (panelEnabled) showPanel(ctx.ui.theme);
 				else hidePanel();
 				ctx.ui.notify(`Side panel ${panelEnabled ? "enabled" : "disabled"}`, "info");
+				return;
+			}
+			if (arg === "compact") {
+				ui.compact = !ui.compact;
+				const cfg = loadMagiConfig();
+				saveMagiConfig({ ...cfg, ui: { ...cfg.ui, compact: ui.compact } });
+				repaint();
+				ctx.ui.notify(`Side panel ${ui.compact ? "compact" : "detailed"}`, "info");
+				return;
+			}
+			if (arg === "status") {
+				if (!swap.base) {
+					ctx.ui.notify("/magi-ui status needs a llama-swap session model", "warning");
+					return;
+				}
+				let report: { data?: ActivityRow[]; total?: number };
+				try {
+					report = (await (await swapGet(`/api/metrics/activity?limit=${ACTIVITY_REPORT_ROWS}`, 15_000)).json()) as typeof report;
+				} catch (err) {
+					ctx.ui.notify(`llama-swap status failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+					return;
+				}
+				const rows = report.data ?? [];
+				if (!rows.length) {
+					ctx.ui.notify("llama-swap has no recorded requests yet", "info");
+					return;
+				}
+				await ctx.ui.custom<void>((_tui, theme, _keys, done) =>
+					buildReportView(theme, activityReport(theme, rows, report.total ?? rows.length), () => done(undefined)),
+				);
 				return;
 			}
 			if (arg === "off" || arg === "on") {
@@ -1570,7 +1905,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			chrome = true;
 			applyChrome(ctx);
-			ctx.ui.notify("MAGI online — /magi-ui panel, /magi-ui off", "info");
+			ctx.ui.notify("MAGI online — /magi-ui panel|compact|status|off", "info");
 		},
 	});
 }
