@@ -42,9 +42,8 @@ const MAGI_WORD = [
 /** Tree of Life canvas, in terminal cells; drawn with braille dots (2×4 sub-pixels per cell). */
 const TREE_W = 30;
 const TREE_H = 20;
-const TREE_H_SMALL = 10;
 
-/** Sephirot in the order of the "lightning flash" (Keter → Malkuth), positioned in sub-pixels of the full-size tree. */
+/** Sephirot in the order of the "lightning flash" (Keter → Malkuth), positioned in sub-pixels. */
 const SEPHIROT = [
 	{ name: "KETER", meaning: "the crown", x: 30, y: 5 },
 	{ name: "CHOKMAH", meaning: "wisdom", x: 50, y: 19 },
@@ -74,16 +73,10 @@ const BRAILLE_BITS = [
 	[0x40, 0x80],
 ]; // [row][col] → dot bit
 
-/**
- * Rasterizes the Tree of Life into braille: paths (muted), Da'at (dim, dashed), sephirot (accent rings).
- * `rows` scales the tree vertically (20 = full size, 10 = small header for short terminals).
- */
-function renderTreeOfLife(th: Theme, rows = TREE_H): string[] {
+/** Rasterizes the Tree of Life into braille: paths (muted), Da'at (dim, dashed), sephirot (accent rings). */
+function renderTreeOfLife(th: Theme): string[] {
 	const W = TREE_W * 2;
-	const H = rows * 4;
-	const scale = rows / TREE_H;
-	const small = rows < TREE_H;
-	const at = (p: { x: number; y: number }) => ({ x: p.x, y: 4 + (p.y - 4) * scale });
+	const H = TREE_H * 4;
 	const PATH = 1;
 	const DAAT_PX = 2;
 	const NODE = 3;
@@ -94,8 +87,8 @@ function renderTreeOfLife(th: Theme, rows = TREE_H): string[] {
 		if (rx >= 0 && ry >= 0 && rx < W && ry < H) px[ry * W + rx] = v;
 	};
 	for (const [a, b] of TREE_PATHS) {
-		const p = at(SEPHIROT[a]!);
-		const q = at(SEPHIROT[b]!);
+		const p = SEPHIROT[a]!;
+		const q = SEPHIROT[b]!;
 		const n = Math.ceil(Math.max(Math.abs(q.x - p.x), Math.abs(q.y - p.y)));
 		for (let i = 0; i <= n; i++) set(p.x + ((q.x - p.x) * i) / n, p.y + ((q.y - p.y) * i) / n, PATH);
 	}
@@ -112,15 +105,14 @@ function renderTreeOfLife(th: Theme, rows = TREE_H): string[] {
 			}
 		}
 	};
-	ring(at(DAAT), small ? 2 : 3, DAAT_PX, true);
+	ring(DAAT, 3, DAAT_PX, true);
 	for (const s of SEPHIROT) {
-		const c = at(s);
-		ring(c, small ? 2.5 : 3.5, NODE, false);
-		set(c.x, c.y, NODE);
+		ring(s, 3.5, NODE, false);
+		set(s.x, s.y, NODE);
 	}
 
 	const lines: string[] = [];
-	for (let row = 0; row < rows; row++) {
+	for (let row = 0; row < TREE_H; row++) {
 		let line = "";
 		for (let col = 0; col < TREE_W; col++) {
 			let bits = 0;
@@ -419,13 +411,9 @@ function magiDiagram(th: Theme, top: UnitView, left: UnitView, right: UnitView, 
 
 /* ─────────────────────────────────────────────────────────── header ── */
 
-/** Terminals shorter than this get the small (10-row) tree in the header. */
-const SHORT_TERMINAL_ROWS = 45;
-
 /** Static header: it scrolls away with the conversation, so nothing here animates. */
 function buildHeader(theme: Theme) {
-	let full: string[] | undefined;
-	let small: string[] | undefined;
+	const tree = renderTreeOfLife(theme);
 
 	return {
 		render(width: number): string[] {
@@ -435,8 +423,6 @@ function buildHeader(theme: Theme) {
 			const triad = MAGI_UNITS.map((u) => theme.fg("success", u)).join(dim(" · "));
 			const subtitle = "KETER → MALKUTH · 10 SEPHIROT · 22 PATHS";
 			const lore = "THE MAGI JUDGE · THE GOLEM ACTS · THE SEALS KEEP TIME";
-			const short = (process.stdout.rows ?? 50) < SHORT_TERMINAL_ROWS;
-			const tree = short ? (small ??= renderTreeOfLife(theme, TREE_H_SMALL)) : (full ??= renderTreeOfLife(theme));
 
 			// Narrow layout: a single identification line.
 			if (width < 44) {
@@ -452,7 +438,7 @@ function buildHeader(theme: Theme) {
 			}
 
 			// Wide layout: tree left, wordmark right (rows chosen to center the text block on the tree).
-			const [wordAt, triadAt] = short ? [0, 7] : [5, 12];
+			const [wordAt, triadAt] = [5, 12];
 			const lines = [""];
 			for (let i = 0; i < tree.length; i++) {
 				let right = "";
@@ -718,6 +704,8 @@ class MagiPanel implements Component {
 	private cache: { at: number; inner: number; compact: boolean; lines: string[] } | undefined;
 	/** git branch, provided by the footer (the only place pi exposes it). */
 	branch?: () => string | null | undefined;
+	/** When set (fullscreen column), the panel pads itself down to this many rows. */
+	fillHeight?: () => number;
 
 	constructor(
 		private readonly tui: TUI,
@@ -1006,7 +994,11 @@ class MagiPanel implements Component {
 			};
 		}
 		const bottom = this.theme.fg("border", "└" + "─".repeat(inner) + "┘");
-		return [...this.councilSection(inner), ...this.cache.lines, bottom].map((l) => truncateToWidth(l, width));
+		const lines = [...this.councilSection(inner), ...this.cache.lines];
+		// fullscreen: keep the frame going down to the bottom of the terminal
+		const target = (this.fillHeight?.() ?? 0) - 1;
+		while (lines.length < target) lines.push(this.frameLine("", inner));
+		return [...lines, bottom].map((l) => truncateToWidth(l, width));
 	}
 }
 
@@ -1518,6 +1510,7 @@ export default function (pi: ExtensionAPI) {
 		// ponytail: reads TuiAltScreen's private layoutRoot field; if pi renames it, falls back to the overlay.
 		const t = tuiRef as any;
 		if (t.mode === "fullscreen" && t.layoutRoot && typeof t.setLayoutRoot === "function") {
+			panel.fillHeight = () => process.stdout.rows ?? 0;
 			wrappedRoot = t.layoutRoot;
 			t.setLayoutRoot(
 				new HStack(

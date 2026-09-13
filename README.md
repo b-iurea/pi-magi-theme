@@ -65,7 +65,7 @@ Every symbol stands for something real the agent is doing.
 
 The window title is `π - Magi - <working directory>`. After a run longer than 30 seconds it becomes `✓ π - Magi - …` until you touch the keyboard, so you notice from another window that the agent finished.
 
-On terminals shorter than 45 rows the header uses a smaller Tree of Life.
+In fullscreen mode the side panel always reaches the bottom of the terminal.
 
 ## The seventh seal: smart compaction
 
