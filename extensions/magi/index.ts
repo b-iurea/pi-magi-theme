@@ -225,10 +225,18 @@ const state = {
 };
 
 /** Panel preferences, persisted under "ui" in ~/.pi/agent/magi.json. */
+type Currency = "EUR" | "USD";
+
 const ui = {
 	compact: false,
-	kwhPrice: undefined as number | undefined, // price per kWh, for the energy cost line
+	kwhPrice: undefined as number | undefined, // price per kWh, for the COST row (/magi-ui config)
+	currency: "EUR" as Currency,
 };
+
+function fmtMoney(value: number): string {
+	const digits = value < 1 ? 3 : 2;
+	return ui.currency === "USD" ? `$${value.toFixed(digits)}` : `${value.toFixed(digits)} €`;
+}
 
 function setPhase(p: Phase): void {
 	if (state.phase === p) return;
@@ -881,7 +889,7 @@ class MagiPanel implements Component {
 				),
 			);
 			if (tokens.cacheRead) out.push(this.field("CACHE", fmtTokens(tokens.cacheRead), inner, "muted"));
-			if (tokens.cost) out.push(this.field("COST", `$${tokens.cost.toFixed(3)}`, inner, "muted"));
+			if (tokens.cost) out.push(this.field("API COST", `$${tokens.cost.toFixed(3)}`, inner, "muted"));
 		}
 
 		// SYNC: the golem's obedience = tool success rate (CHESED ✓ / GEBURAH ✗)
@@ -940,6 +948,13 @@ class MagiPanel implements Component {
 		return out;
 	}
 
+	/** COST: GPU energy used in the session × price per kWh set with /magi-ui config. */
+	private costRow(inner: number): string {
+		if (!swap.gpus.length) return this.field("COST", "—", inner, "muted");
+		if (ui.kwhPrice === undefined) return this.field("COST", "→ /magi-ui config", inner, "dim");
+		return this.field("COST", fmtMoney((swap.energyWh / 1000) * ui.kwhPrice), inner, "warning");
+	}
+
 	private swapRows(inner: number, compact: boolean): string[] {
 		if (!swap.base) return [];
 		const th = this.theme;
@@ -954,7 +969,7 @@ class MagiPanel implements Component {
 						: th.fg("warning", swap.state === "loading" ? `LOADING ${secsSince(swap.since)}s` : "CHECKING");
 		const load = swap.state === "ready" && swap.loadMs ? th.fg("dim", ` load ${fmtMs(swap.loadMs)}`) : "";
 		out.push(this.frameLine(` ${th.fg("dim", "STATUS".padEnd(9))}${st}${load}`, inner));
-		if (compact) return out;
+		if (compact) return [...out, this.costRow(inner)];
 		if (swap.state === "error") out.push(this.frameLine(" " + th.fg("error", swap.error), inner));
 		const gib = (n: number) => n / 2 ** 30;
 		for (const [i, g] of swap.gpus.entries()) {
@@ -973,11 +988,8 @@ class MagiPanel implements Component {
 			);
 		}
 		if (swap.ramTotal) out.push(this.field("RAM", `${gib(swap.ramUsed).toFixed(1)} / ${Math.round(gib(swap.ramTotal))}G`, inner, "muted"));
-		if (swap.gpus.length) {
-			const kwh = swap.energyWh / 1000;
-			const cost = ui.kwhPrice !== undefined ? ` · ${(kwh * ui.kwhPrice).toFixed(2)}€` : "";
-			out.push(this.field("ENERGY", `${kwh.toFixed(3)} kWh${cost}`, inner, "muted"));
-		}
+		if (swap.gpus.length) out.push(this.field("ENERGY", `${(swap.energyWh / 1000).toFixed(3)} kWh`, inner, "muted"));
+		out.push(this.costRow(inner));
 		return out;
 	}
 
@@ -1082,7 +1094,7 @@ interface MagiUnitConfig {
 	model?: string;
 	thinking?: string;
 }
-type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & { ui?: { compact?: boolean; kwhPrice?: number } };
+type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & { ui?: { compact?: boolean; kwhPrice?: number; currency?: Currency } };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
 
@@ -1477,6 +1489,8 @@ function buildFooter(tui: TUI, theme: Theme, footerData: any) {
 
 const BUSY_POLL_MS = 3_000;
 const IDLE_POLL_MS = 30_000;
+/** pi rewrites the window title on its own (right after startup, on session info changes), so ours is re-applied. */
+const TITLE_REFRESH_MS = 2_000;
 
 /** Window title: "π - Magi - <working directory>", prefixed with ✓ after a long run until you are back. */
 function windowTitle(cwd: string, done = false): string {
@@ -1598,6 +1612,9 @@ export default function (pi: ExtensionAPI) {
 	let metricsTimer: ReturnType<typeof setInterval> | undefined;
 	let unsubscribeInput: (() => void) | undefined;
 	let lastPoll = 0;
+	let titleTimer: ReturnType<typeof setInterval> | undefined;
+	/** Tools currently executing, by call id: the golem shows one of them, and leaves when none is left. */
+	const runningTools = new Map<string, { name: string; target: string }>();
 
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
@@ -1606,6 +1623,7 @@ export default function (pi: ExtensionAPI) {
 		const cfg = loadMagiConfig();
 		ui.compact = cfg.ui?.compact ?? false;
 		ui.kwhPrice = cfg.ui?.kwhPrice;
+		ui.currency = cfg.ui?.currency === "USD" ? "USD" : "EUR";
 		if (ctx.mode !== "tui") return;
 		applyChrome(ctx);
 		// load the model into VRAM now (animated in the panel and footer)
@@ -1629,6 +1647,11 @@ export default function (pi: ExtensionAPI) {
 			if (swap.state === "asleep" && liveCtx) void preloadModel(liveCtx);
 			return undefined;
 		});
+		// ponytail: re-applies the title every 2s because pi overwrites it without telling extensions
+		titleTimer ??= setInterval(() => {
+			if (chrome) ctx.ui.setTitle(windowTitle(ctx.cwd, titleDone));
+		}, TITLE_REFRESH_MS);
+		titleTimer.unref?.();
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
@@ -1647,6 +1670,8 @@ export default function (pi: ExtensionAPI) {
 		metricsTimer = undefined;
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
+		clearInterval(titleTimer);
+		titleTimer = undefined;
 		hidePanel();
 	});
 
@@ -1676,7 +1701,15 @@ export default function (pi: ExtensionAPI) {
 		const t = e?.type;
 		if (t === "thinking_start" || t === "thinking_delta") setPhase("thinking");
 		else if (t === "text_start" || t === "text_delta") setPhase("responding");
-		else if (t === "toolcall_start" || t === "toolcall_delta") setPhase("tool");
+		else if (t === "toolcall_start" || t === "toolcall_delta") {
+			// the model is writing a tool call: the golem shows which tool it prepares, not the previous one
+			setPhase("tool");
+			const call = e.partial?.content?.[e.contentIndex];
+			if (call?.type === "toolCall") {
+				state.toolName = call.name ?? "";
+				state.toolTarget = toolTarget(call.arguments);
+			}
+		}
 		if (typeof e?.delta === "string" && e.delta) {
 			if (!perf.first) perf.first = Date.now();
 			perf.chars += e.delta.length;
@@ -1708,21 +1741,36 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_execution_start", async (event, ctx) => {
 		liveCtx = ctx;
+		const tool = { name: event.toolName ?? "", target: toolTarget(event.args) };
+		runningTools.set(event.toolCallId, tool);
 		setPhase("tool");
-		state.toolName = event.toolName ?? "";
-		state.toolTarget = toolTarget(event.args);
+		state.toolName = tool.name;
+		state.toolTarget = tool.target;
 		repaint();
 	});
 
 	// CHESED (mercy) counts what worked, GEBURAH (severity) what failed; a failure erases the golem's aleph.
 	pi.on("tool_execution_end", async (event) => {
+		const tool = runningTools.get(event.toolCallId);
+		runningTools.delete(event.toolCallId);
 		if (event.isError) {
 			state.toolFail++;
 			state.lastFailAt = Date.now();
-			state.lastFailTool = event.toolName ?? "tool";
-			state.lastFailTarget = state.toolTarget;
+			state.lastFailTool = event.toolName ?? tool?.name ?? "tool";
+			state.lastFailTarget = tool?.target ?? "";
 		} else {
 			state.toolOk++;
+		}
+		const next = [...runningTools.values()][0];
+		if (next) {
+			// parallel tools: the golem moves on to one still running
+			state.toolName = next.name;
+			state.toolTarget = next.target;
+		} else {
+			// all tools done: the model now reads their results and thinks about the next step
+			setPhase("thinking");
+			state.toolName = "";
+			state.toolTarget = "";
 		}
 		repaint();
 	});
@@ -1732,6 +1780,7 @@ export default function (pi: ExtensionAPI) {
 		if (state.runStart) state.lastRunMs = Date.now() - state.runStart;
 		state.runStart = 0;
 		setPhase("idle");
+		runningTools.clear();
 		state.toolName = "";
 		state.toolTarget = "";
 		if (ctx.mode === "tui" && chrome) {
@@ -1842,7 +1891,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status)",
+		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config)",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
@@ -1860,6 +1909,29 @@ export default function (pi: ExtensionAPI) {
 				saveMagiConfig({ ...cfg, ui: { ...cfg.ui, compact: ui.compact } });
 				repaint();
 				ctx.ui.notify(`Side panel ${ui.compact ? "compact" : "detailed"}`, "info");
+				return;
+			}
+			if (arg === "config") {
+				const currency = await ctx.ui.select(`Currency for COST (current: ${ui.currency})`, ["EUR", "USD"]);
+				if (!currency) return;
+				const current = ui.kwhPrice !== undefined ? ` (current: ${ui.kwhPrice})` : "";
+				const raw = (await ctx.ui.input(`Electricity price per kWh in ${currency}${current}:`, "0.30"))?.trim();
+				if (raw === undefined) return;
+				const price = raw === "" && ui.kwhPrice !== undefined ? ui.kwhPrice : Number(raw.replace(",", "."));
+				if (raw === "" && ui.kwhPrice === undefined) {
+					ctx.ui.notify("No price entered: COST unchanged", "warning");
+					return;
+				}
+				if (!Number.isFinite(price) || price < 0) {
+					ctx.ui.notify(`Invalid price: "${raw}"`, "error");
+					return;
+				}
+				ui.currency = currency === "USD" ? "USD" : "EUR";
+				ui.kwhPrice = price;
+				const cfg = loadMagiConfig();
+				saveMagiConfig({ ...cfg, ui: { ...cfg.ui, currency: ui.currency, kwhPrice: price } });
+				repaint();
+				ctx.ui.notify(`COST: ${fmtMoney(price)} per kWh`, "info");
 				return;
 			}
 			if (arg === "status") {

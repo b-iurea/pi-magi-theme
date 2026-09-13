@@ -41,6 +41,7 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi config` | pick a model for each MAGI |
 | `/magi-ui compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
 | `/magi-ui status` | llama-swap report from its last 100 requests: speed, tokens, cache hits, MTP draft acceptance, durations, errors per model |
+| `/magi-ui config` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
 | `/magi-ui panel` · `on` · `off` | hide/show the side panel, enable/disable the whole chrome |
 
 ## Lore ↔ function
@@ -93,18 +94,18 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 
 ## Configuration
 
-`~/.pi/agent/magi.json` (written by `/magi config` and `/magi-ui compact`, editable by hand):
+`~/.pi/agent/magi.json` (written by `/magi config`, `/magi-ui compact` and `/magi-ui config`, editable by hand):
 
 ```json
 {
   "MELCHIOR": { "model": "llama-swap/Qwen3.8 27B Q4_K_M - Thinking", "thinking": "low" },
-  "ui": { "compact": false, "kwhPrice": 0.30 }
+  "ui": { "compact": false, "kwhPrice": 0.30, "currency": "EUR" }
 }
 ```
 
 - per MAGI: `model` (unset = current session model) and optional `thinking` level;
 - `ui.compact`: start with the compact side panel;
-- `ui.kwhPrice`: price per kWh, to show the cost next to the energy used by the GPUs.
+- `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy used in the session by this price.
 
 ## llama-swap
 
