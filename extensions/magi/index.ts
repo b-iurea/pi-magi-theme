@@ -800,9 +800,11 @@ class MagiPanel implements Component {
 			),
 		);
 		if (swap.srvPps) out.push(this.field("PROMPT/S", swap.srvPps.toFixed(1), inner, "muted"));
-		if (swap.inputTokens) {
-			const hit = Math.round((swap.cacheTokens / swap.inputTokens) * 100);
-			out.push(this.field("KV CACHE", `${fmtTokens(swap.cacheTokens)}/${fmtTokens(swap.inputTokens)} hit ${hit}%`, inner, "muted"));
+		// llama-swap's input_tokens are the prompt tokens processed outside the cache
+		const promptTotal = swap.cacheTokens + swap.inputTokens;
+		if (promptTotal) {
+			const hit = Math.round((swap.cacheTokens / promptTotal) * 100);
+			out.push(this.field("KV CACHE", `${fmtTokens(swap.cacheTokens)}/${fmtTokens(promptTotal)} hit ${hit}%`, inner, "muted"));
 		}
 		out.push(this.field("PEAK", perf.peakTps ? `${perf.peakTps.toFixed(1)} tok/s` : "—", inner, "muted"));
 		out.push(this.field("TTFT", perf.ttft ? fmtMs(perf.ttft) : "—", inner, "muted"));

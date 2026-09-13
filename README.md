@@ -4,6 +4,10 @@ A three-mind council theme + extension for [pi](https://pi.dev): a detailed Tree
 
 All artwork is original. The symbolism (the three Magi, the Tree of Life, the golem, the seven seals) is public domain.
 
+![pi with the MAGI theme: Tree of Life header, side panel with the MAGI triangle and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
+
+![The MAGI deliberating while the model thinks](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/deliberation.png)
+
 ## Install
 
 ```bash
