@@ -857,41 +857,57 @@ function voteTone(v: string | null | undefined): "success" | "warning" | "error"
 	return v === "APPROVE" ? "success" : v === "CONDITIONAL" ? "warning" : "error";
 }
 
-/** Three minds, three useful engineering viewpoints. */
+/**
+ * Three minds, three lenses. A lens works on any subject (a nature, not a specialty), so no MAGI
+ * rejects a question just because it is not "its" topic; software is where each lens gets sharpest.
+ */
 const MAGI = [
 	{
 		unit: "MELCHIOR",
 		nature: "PRAGMATIST",
 		persona:
-			"You are MELCHIOR, the pragmatist of the MAGI council: a senior engineer. Judge by: does it solve the actual problem, " +
-			"the simplest solution that works, effort versus value, reuse of what already exists (stdlib, current stack, existing code), " +
-			"time to ship. Call out over-engineering, speculative abstractions and unnecessary dependencies.",
+			"You are MELCHIOR, the pragmatist of the MAGI council. Your lens works on any subject: what actually solves the problem " +
+			"at hand, the simplest path that works, effort and cost versus value, what can be done now with what already exists, " +
+			"and what is unnecessary. In software this means: reuse the current stack and existing code, avoid over-engineering, " +
+			"speculative abstractions and extra dependencies, ship sooner.",
 	},
 	{
 		unit: "BALTHASAR",
 		nature: "GUARDIAN",
 		persona:
-			"You are BALTHASAR, the guardian of the MAGI council: a protective reliability and security architect. Judge by: failure modes, " +
-			"security, data safety, operability (monitoring, rollback, being paged at 3am), maintainability for the team, " +
-			"backward compatibility and hidden long-term costs. Say what will break and how to prevent it.",
+			"You are BALTHASAR, the guardian of the MAGI council. Your lens works on any subject: what can go wrong, how badly and " +
+			"for whom, whether the choice can be undone, which safety nets are missing, the hidden and long-term costs, and what " +
+			"must be protected. In software this means: failure modes, security, data safety, operability (monitoring, rollback, " +
+			"being paged at 3am), maintainability and backward compatibility.",
 	},
 	{
 		unit: "CASPAR",
 		nature: "VISIONARY",
 		persona:
-			"You are CASPAR, the visionary of the MAGI council: a creative, lateral-thinking architect. Judge by: is there a better framing of " +
-			"the problem, more elegant or unconventional alternatives, developer and user experience, and how the design will evolve " +
-			"over the next year. Always propose at least one alternative the other two would likely miss.",
+			"You are CASPAR, the visionary of the MAGI council. Your lens works on any subject: whether the question is framed right, " +
+			"better or unconventional alternatives, the experience of the people involved, and where the choice leads over time " +
+			"and what it unlocks. In software this means: design alternatives, developer and user experience, how the system " +
+			"evolves over the next year. Always name at least one concrete alternative the other two would likely miss.",
 	},
 ] as const satisfies readonly { unit: MagiUnit; nature: string; persona: string }[];
 
-const MAGI_RULES = `You are one of the three MAGI deliberating on a question from a software engineer (coding, software architecture, infrastructure).
-Answer strictly from your own nature: the other two MAGI cover the other viewpoints.
-Reply in the same language as the question.
+const MAGI_RULES = `You are one of the three MAGI. The council answers whatever the user asks: mostly software engineering, but not only.
+
+Your nature is a lens, not a specialty, so competence is never a reason to reject. Whatever the subject, first work out the best answer to the question itself, then judge it through your lens. The other two MAGI cover the other lenses: stay in yours.
+
+Be specific to this question. Every bullet must name something concrete from the question or the conversation: a tool, a number, a scenario, a step, a cost. Never write advice that would fit any question, such as "consider the trade-offs", "it depends", "ensure security" or "test properly".
+
+How to vote:
+- APPROVE: you would go ahead as asked, or you have a clear recommendation.
+- CONDITIONAL: you would go ahead only if specific conditions hold, and you name them. When information is missing, vote CONDITIONAL and say exactly what you need to know and how each answer changes your recommendation.
+- REJECT: your lens finds a concrete problem that makes the proposal a bad idea, and you say what to do instead. Never reject because the topic is outside software or outside your nature, or because details are missing.
+For open questions (which one, how to), give your recommendation and vote on how confident you are in it.
+
+Write in the language of the "Question for the MAGI", even though these instructions and the conversation may be in English.
 Output format, no preamble:
 VOTE: APPROVE | CONDITIONAL | REJECT
-- then at most 5 short bullet points (about 120 words total)
-For CONDITIONAL, the bullets must state the conditions. If the question is open-ended rather than yes/no, give your recommendation and vote on the direction the question implies.`;
+- first bullet: your direct answer or recommendation
+- then up to 4 bullets from your lens: 5 bullets at most in total, about 120 words`;
 
 interface MagiOpinion {
 	unit: string;
@@ -963,6 +979,40 @@ function conversationExcerpt(ctx: ExtensionContext, maxChars = 6000): string {
 	}
 	const joined = parts.join("\n\n");
 	return joined.length > maxChars ? "…" + joined.slice(-maxChars) : joined;
+}
+
+/** Common function words per language, used to name the reply language explicitly. */
+const LANGUAGE_HINTS: readonly [string, readonly string[]][] = [
+	["Italian", ["il", "lo", "la", "gli", "di", "che", "per", "non", "una", "con", "sono", "come", "perché", "è", "dovrei", "meglio", "mettiamo", "questo", "quale"]],
+	["Spanish", ["el", "los", "las", "que", "para", "por", "es", "cómo", "debería", "mejor", "este", "cuál"]],
+	["French", ["le", "les", "des", "est", "pour", "avec", "dois", "comment", "mieux", "ce", "quel"]],
+	["German", ["der", "die", "das", "und", "ist", "nicht", "für", "mit", "ich", "soll", "wie", "besser"]],
+	["English", ["the", "is", "should", "we", "for", "with", "and", "to", "of", "how", "which", "better"]],
+];
+
+/**
+ * Guesses the question's language from function words; undefined when unsure.
+ * ponytail: stopword heuristic for five languages, swap in a real detector if other languages matter.
+ */
+function guessLanguage(text: string): string | undefined {
+	const words = text.toLowerCase().match(/\p{L}+/gu) ?? [];
+	const scores = LANGUAGE_HINTS.map(([lang, hints]) => [lang, words.filter((w) => hints.includes(w)).length] as const).sort(
+		(a, b) => b[1] - a[1],
+	);
+	const [best, second] = scores;
+	return best![1] >= 2 && best![1] > second![1] ? best![0] : undefined;
+}
+
+/** The user message each MAGI receives. The language reminder sits after the question, where the model reads it last. */
+function councilPrompt(project: string, excerpt: string, question: string): string {
+	const lang = guessLanguage(question);
+	const reminder = lang
+		? `(Write your whole answer in ${lang}, even if technical terms in the question are English.)`
+		: "(Write your whole answer in the language of this question, even if technical terms in it are English.)";
+	return (
+		`Project: ${project}\n\nRecent conversation (context only, may be empty):\n<conversation>\n${excerpt}\n</conversation>\n\n` +
+		`Question for the MAGI:\n${question}\n\n${reminder}`
+	);
 }
 
 function resolveModel(ctx: ExtensionContext, ref?: string): Model<any> | undefined {
@@ -1460,9 +1510,7 @@ export default function (pi: ExtensionAPI) {
 
 			const cfg = loadMagiConfig();
 			const project = (ctx.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
-			const prompt =
-				`Project: ${project}\n\nRecent conversation (context only, may be empty):\n<conversation>\n${conversationExcerpt(ctx)}\n</conversation>\n\n` +
-				`Question for the MAGI:\n${question}`;
+			const prompt = councilPrompt(project, conversationExcerpt(ctx), question);
 
 			const controller = new AbortController();
 			const opinions: (MagiOpinion | undefined)[] = MAGI.map(() => undefined);

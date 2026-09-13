@@ -68,9 +68,11 @@ It extracts files, errors, decisions and open loops locally (no LLM calls), then
 
 | Unit | Nature | Looks at |
 |------|--------|----------|
-| MELCHIOR | PRAGMATIST | simplest working solution, effort vs value, reuse, YAGNI |
-| BALTHASAR | GUARDIAN | failure modes, security, operability, maintainability |
-| CASPAR | VISIONARY | reframing the problem, alternatives, DX, evolution |
+| MELCHIOR | PRAGMATIST | what solves the problem, the simplest path, effort vs value, what already exists (in software: reuse, YAGNI, shipping) |
+| BALTHASAR | GUARDIAN | what can go wrong and for whom, reversibility, hidden costs (in software: failure modes, security, operability) |
+| CASPAR | VISIONARY | whether the question is framed right, alternatives, people's experience, long-term direction (in software: design, DX, evolution) |
+
+Each nature is a lens, not a specialty, so the council answers any question, not only software ones. Every MAGI first answers the question, then judges it through its lens, naming concrete tools, numbers and scenarios from your question instead of generic advice. Votes: **APPROVE** = go ahead or clear recommendation; **CONDITIONAL** = only if the named conditions hold, or when information is missing (it says what it needs); **REJECT** = a concrete problem, with what to do instead. A MAGI never rejects because a topic is outside its nature. Answers come back in the language of your question.
 
 Each MAGI also gets the recent conversation as context. Full opinions are added to the chat (not sent to the agent).
 
