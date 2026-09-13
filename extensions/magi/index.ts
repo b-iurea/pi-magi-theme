@@ -200,7 +200,6 @@ const state = {
 	phaseSince: Date.now(),
 	toolName: "",
 	turns: 0,
-	tools: 0,
 	toolOk: 0, // CHESED
 	toolFail: 0, // GEBURAH
 	lastFailAt: 0,
@@ -209,6 +208,7 @@ const state = {
 	lastRunMs: 0,
 	compacting: false,
 	compactSince: 0,
+	compactBy: "", // who opens the seals: "smart-compact" (pi-smart-compact package) or "pi native"
 	rebornAt: 0,
 };
 
@@ -646,7 +646,9 @@ class MagiPanel implements Component {
 			if (state.compacting || now - state.rebornAt < REBIRTH_MS) {
 				// the seals break while the context is compacted; then the world is remade
 				const reborn = !state.compacting;
-				title = reborn ? "SEVENTH SEAL OPENED · REBORN" : `BREAKING THE SEALS ${secsSince(state.compactSince, now)}s`;
+				title = reborn
+					? "SEVENTH SEAL OPENED · REBORN"
+					: `SEALS · ${state.compactBy || "compacting"} ${secsSince(state.compactSince, now)}s`;
 				link = reborn ? "success" : f % 4 < 2 ? "warning" : "error";
 				hub = reborn ? "═MAGI═" : ["─SEAL─", "━SEAL━"][f % 2]!;
 				units = names.map((name, i) =>
@@ -748,7 +750,7 @@ class MagiPanel implements Component {
 		const stats = tokenStats();
 		out.push(
 			this.frameLine(
-				` ${th.fg("dim", "TURNS".padEnd(9))}${th.fg("text", String(state.turns).padEnd(6))}${th.fg("dim", "TOOLS ")}${th.fg("text", String(state.tools))}`,
+				` ${th.fg("dim", "TURNS".padEnd(9))}${th.fg("text", String(state.turns))}`,
 				inner,
 			),
 		);
@@ -771,14 +773,13 @@ class MagiPanel implements Component {
 				inner,
 			),
 		);
-		if (state.toolOk + state.toolFail) {
-			out.push(
-				this.frameLine(
-					` ${th.fg("dim", "CHESED".padEnd(9))}${th.fg("success", `✓${state.toolOk}`.padEnd(6))}${th.fg("dim", "GEBURAH ")}${th.fg(state.toolFail ? "error" : "dim", `✗${state.toolFail}`)}`,
-					inner,
-				),
-			);
-		}
+		// TOOLS: CHESED (mercy) = succeeded, GEBURAH (severity) = failed
+		out.push(
+			this.frameLine(
+				` ${th.fg("dim", "TOOLS".padEnd(7))}${th.fg("success", `✓${state.toolOk}`)}${th.fg("dim", " CHESED ")}${th.fg(state.toolFail ? "error" : "dim", `✗${state.toolFail}`)}${th.fg("dim", " GEBURAH")}`,
+				inner,
+			),
+		);
 
 		// SEALS: the context window, one seal per seventh
 		const usage = liveCtx?.getContextUsage?.();
@@ -1121,7 +1122,9 @@ function footerLeft(th: Theme, now = Date.now()): string {
 			th.fg("warning", "◉".repeat(broken)) +
 			dim("○".repeat(7 - broken)) +
 			th.fg("warning", " BREAKING THE SEALS") +
-			dim(` · compacting context ${secsSince(state.compactSince, now)}s`)
+			dim(" · ") +
+			th.fg("text", state.compactBy || "compacting") +
+			dim(` · ${secsSince(state.compactSince, now)}s`)
 		);
 	}
 	if (now - state.rebornAt < REBIRTH_MS) {
@@ -1129,7 +1132,7 @@ function footerLeft(th: Theme, now = Date.now()): string {
 			th.fg("success", "✶ ") +
 			renderPath(th, lights(() => (step % 2 ? "on" : "hot"))) +
 			th.fg("success", " SEVENTH SEAL OPENED") +
-			dim(" · context compacted, the world is remade")
+			dim(` · context compacted by ${state.compactBy || "pi"}, the world is remade`)
 		);
 	}
 	if (state.phase === "tool" || now - state.lastFailAt < FAIL_FLASH_MS) {
@@ -1397,7 +1400,6 @@ export default function (pi: ExtensionAPI) {
 		liveCtx = ctx;
 		setPhase("tool");
 		state.toolName = event.toolName ?? "";
-		state.tools++;
 		repaint();
 	});
 
@@ -1424,15 +1426,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// The seven seals: compaction breaks them, and the context is reborn.
+	// When pi-smart-compact is installed it owns the compaction; this theme only watches and names it.
+	const hasSmartCompact = () => pi.getCommands().some((c) => c.name.replace(/^\//, "") === "smart-compact");
+
 	pi.on("session_before_compact", async () => {
 		state.compacting = true;
 		state.compactSince = Date.now();
+		state.compactBy = hasSmartCompact() ? "smart-compact" : "pi native";
 		repaint();
 	});
 
-	pi.on("session_compact", async () => {
+	pi.on("session_compact", async (event) => {
 		state.compacting = false;
 		state.rebornAt = Date.now();
+		// fromExtension: an extension supplied the summary; otherwise pi's own compactor did (e.g. smart-compact fell back)
+		state.compactBy = event.fromExtension ? (hasSmartCompact() ? "smart-compact" : "extension") : "pi native";
 		repaint();
 	});
 

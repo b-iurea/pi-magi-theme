@@ -52,6 +52,16 @@ Every symbol stands for something real the agent is doing.
 | the seven seals | the end of an age | **context window usage**, one seal per seventh | panel |
 | breaking the seals → seventh seal opened | apocalypse and renewal | **context compaction** running → done | panel + footer |
 
+## The seventh seal: smart compaction
+
+The theme does not compact anything itself: it shows who does. For better compaction install [pi-smart-compact](https://www.npmjs.com/package/pi-smart-compact):
+
+```bash
+pi install npm:pi-smart-compact
+```
+
+It extracts files, errors, decisions and open loops locally (no LLM calls), then synthesizes and verifies the summary. Point its `summaryModel` at a local model to keep compaction free. When it is installed, the seals name it while they break (`✶ BREAKING THE SEALS · smart-compact · 4s`) and the seventh seal reports who actually produced the summary: `smart-compact`, or `pi native` if it fell back to pi's own compactor.
+
 ## The council
 
 `/magi <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
