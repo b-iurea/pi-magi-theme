@@ -6,16 +6,27 @@ All artwork is original. The symbolism (the three Magi, the Tree of Life, the go
 
 ## Install
 
-Clone the repo and point pi at it (no copying: edits in the repo are live on the next pi start). In `~/.pi/agent/settings.json`:
+```bash
+pi install npm:pi-magi-theme
+```
+
+Then in `~/.pi/agent/settings.json`:
 
 ```json
-"extensions": ["/path/to/pi-magi-theme/extensions/magi"],
-"themes": ["/path/to/pi-magi-theme/themes"],
 "theme": "magi",
 "tuiMode": "fullscreen"
 ```
 
 `tuiMode: fullscreen` keeps the side panel fixed while the chat scrolls.
+
+### From source
+
+Clone the repo and point pi at it instead (edits in the repo are live on the next pi start):
+
+```json
+"extensions": ["/path/to/pi-magi-theme/extensions/magi"],
+"themes": ["/path/to/pi-magi-theme/themes"]
+```
 
 Commands: `/magi <question>`, `/magi config`, `/magi-ui [on|off|panel]`.
 
