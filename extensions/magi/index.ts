@@ -730,6 +730,39 @@ async function refreshSwapActivity(): Promise<void> {
 	}
 }
 
+/** Context filled right now in llama-server's busy slot: prompt tokens placed so far plus the ones generated. */
+const live = { tokens: 0, at: 0 };
+const LIVE_POLL_MS = 500;
+const LIVE_STALE_MS = 2_000;
+
+/**
+ * Reads the busy slot of the session model (llama-server /slots): n_prompt_tokens grows batch by batch
+ * while the prompt is processed, then token by token while the model thinks and answers.
+ * ponytail: with several slots it takes the fullest busy one, assuming it is this session's request.
+ */
+async function refreshLiveContext(): Promise<void> {
+	if (!swap.base || swap.state !== "ready") return;
+	try {
+		const slots = (await (await swapGet(`/upstream/${encodeURIComponent(swap.realId)}/slots`, 1_500)).json()) as any[];
+		const busy = slots.filter((s) => s.is_processing && s.n_prompt_tokens > 0);
+		if (!busy.length) return;
+		live.tokens = Math.max(...busy.map((s) => s.n_prompt_tokens));
+		live.at = Date.now();
+	} catch {
+		// the pi estimate stays
+	}
+}
+
+/** Context usage for the seals: live from the slot while the model works, pi's estimate otherwise. */
+function contextUsage(): { tokens: number | null; contextWindow: number; percent: number; live: boolean } | undefined {
+	const usage = liveCtx?.getContextUsage?.();
+	if (!usage) return undefined;
+	if (state.phase !== "idle" && usage.contextWindow && Date.now() - live.at < LIVE_STALE_MS) {
+		return { tokens: live.tokens, contextWindow: usage.contextWindow, percent: Math.min(100, (live.tokens / usage.contextWindow) * 100), live: true };
+	}
+	return { tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent ?? 0, live: false };
+}
+
 /** id → the model llama-swap actually runs for it: an alias (e.g. "… - Instruct") runs another model. */
 async function swapAliases(): Promise<Map<string, string>> {
 	const aliases = new Map<string, string>();
@@ -1091,9 +1124,10 @@ class MagiPanel implements Component {
 		);
 
 		// SEALS: the context window, one seal per seventh
-		const usage = liveCtx?.getContextUsage?.();
+		const usage = contextUsage();
 		const percent = usage?.percent ?? 0;
-		out.push(this.frameLine(` ${th.fg("dim", "SEALS".padEnd(9))}${renderSeals(th, percent)} ${th.fg(usageTone(percent), `${percent.toFixed(0)}%`)}`, inner));
+		const liveMark = usage?.live ? th.fg("accent", " ▲ live") : "";
+		out.push(this.frameLine(` ${th.fg("dim", "SEALS".padEnd(9))}${renderSeals(th, percent)} ${th.fg(usageTone(percent), `${percent.toFixed(0)}%`)}${liveMark}`, inner));
 		if (!compact && usage?.contextWindow) {
 			out.push(this.field("CONTEXT", `${usage.tokens == null ? "?" : fmtTokens(usage.tokens)} / ${fmtTokens(usage.contextWindow)}`, inner, "muted"));
 		}
@@ -1689,7 +1723,7 @@ function footerLeft(th: Theme, now = Date.now()): string {
 			dim(` · loading model into VRAM ${secsSince(swap.since, now)}s`)
 		);
 	}
-	const percent = liveCtx?.getContextUsage?.()?.percent ?? 0;
+	const percent = contextUsage()?.percent ?? 0;
 	if (percent >= SIXTH_SEAL_PERCENT) {
 		const cmd = state.hasSmartCompact ? "/smart-compact" : "/compact";
 		return (
@@ -1860,6 +1894,7 @@ export default function (pi: ExtensionAPI) {
 	let unsubscribeInput: (() => void) | undefined;
 	let lastPoll = 0;
 	let titleTimer: ReturnType<typeof setInterval> | undefined;
+	let liveTimer: ReturnType<typeof setInterval> | undefined;
 	/** Tools currently executing, by call id: the golem shows one of them, and leaves when none is left. */
 	const runningTools = new Map<string, { name: string; target: string }>();
 
@@ -1921,6 +1956,11 @@ export default function (pi: ExtensionAPI) {
 				.then(repaint);
 		}, BUSY_POLL_MS);
 		metricsTimer.unref?.();
+		// the seals follow the context live while the model works
+		liveTimer ??= setInterval(() => {
+			if (state.phase !== "idle") void refreshLiveContext().then(repaint);
+		}, LIVE_POLL_MS);
+		liveTimer.unref?.();
 		// back at the keyboard: clear the ✓ from the title, wake a model llama-swap unloaded
 		unsubscribeInput ??= ctx.ui.onTerminalInput(() => {
 			if (titleDone) {
@@ -1955,6 +1995,8 @@ export default function (pi: ExtensionAPI) {
 		unsubscribeInput = undefined;
 		clearInterval(titleTimer);
 		titleTimer = undefined;
+		clearInterval(liveTimer);
+		liveTimer = undefined;
 		hidePanel();
 	});
 
