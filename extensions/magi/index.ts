@@ -10,6 +10,8 @@
  *    a failing tool erases the aleph and EMET becomes MET ("death"). SYNC is the tool success rate
  *  - CHESED (mercy) and GEBURAH (severity) count successful and failed tools
  *  - the SEVEN SEALS measure the context window; the sixth warns before compaction, the seventh opens when it runs
+ *  - EVA SELECT: a new llama-swap session loads nothing until you pick the unit (model) to activate;
+ *    each model gets an EVA head, lit when it is already in VRAM, waking while it loads
  *  - llama-swap telemetry: VRAM, GPU load/temp/power, energy used, RAM, server-side tok/s, prompt tok/s, cache hits
  *  - /magi config → assign a model to each MAGI; /magi-ui compact|status → smaller panel, llama-swap report
  *
@@ -177,6 +179,151 @@ const GOLEM_FALLEN = [
 	"      ███  ███      ",
 	"     ▀▀▀▀  ▀▀▀▀     ",
 ];
+
+/* ── EVA units: the heads of the model picker, one unit per model llama-swap runs ── */
+
+type EvaUnit = "01" | "00" | "02" | "MP";
+type EvaState = "dormant" | "waking" | "active";
+type Rgb = readonly [number, number, number];
+
+/**
+ * Heads of 13×7 cells. mask: e = eyes (the light), a = accent, anything else = armor.
+ * jaw: rows that replace the art from row `at` while the unit wakes (the jaw lock breaks).
+ * Colors are the units' own, outside the theme palette on purpose.
+ */
+const EVA: Record<EvaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; art: string[]; mask: string[]; jaw: { at: number; rows: string[] } }> = {
+	"01": {
+		name: "UNIT-01",
+		armor: [124, 82, 196],
+		accent: [132, 222, 84],
+		eyes: [170, 255, 120],
+		art: [
+			"      ▲      ",
+			"     ███     ",
+			"   ▄█████▄   ",
+			"  ██▀▀█▀▀██  ",
+			"  █ ◣   ◢ █  ",
+			"  ▀█▄▄█▄▄█▀  ",
+			"    ▀▄▄▄▀    ",
+		],
+		mask: [
+			"             ",
+			"             ",
+			"             ",
+			"    aa aa    ",
+			"    e   e    ",
+			"             ",
+			"    aaaaa    ",
+		],
+		jaw: { at: 5, rows: ["  ▀█▀▀▀▀▀█▀  ", "   █▄▀▄▀▄█   "] },
+	},
+	"00": {
+		name: "UNIT-00",
+		armor: [236, 140, 44],
+		accent: [90, 160, 255],
+		eyes: [120, 200, 255],
+		art: [
+			"    ▄▄▄▄▄    ",
+			"  ▄█▀▀▀▀▀█▄  ",
+			" ▐█  ▄▄▄  █▌ ",
+			" ▐█  ███  █▌ ",
+			"  ▀█▄▄▄▄▄█▀  ",
+			"    ▀███▀    ",
+			"             ",
+		],
+		mask: [
+			"    aaaaa    ",
+			"             ",
+			"     eee     ",
+			"     eee     ",
+			"             ",
+			"             ",
+			"             ",
+		],
+		jaw: { at: 5, rows: ["    ▀▄▀▄▀    "] },
+	},
+	"02": {
+		name: "UNIT-02",
+		armor: [214, 40, 44],
+		accent: [245, 160, 40],
+		eyes: [120, 255, 160],
+		art: [
+			" ◥▄       ▄◤ ",
+			"  ██▄▄▄▄▄██  ",
+			"  █ ●   ● █  ",
+			"  █  ● ●  █  ",
+			"  ▀██▄▄▄██▀  ",
+			"    ▀███▀    ",
+			"             ",
+		],
+		mask: [
+			" aa       aa ",
+			"             ",
+			"    e   e    ",
+			"     e e     ",
+			"             ",
+			"             ",
+			"             ",
+		],
+		jaw: { at: 4, rows: ["  ▀█▀▄▀▄▀█▀  ", "   ▀▄▀▄▀▄▀   "] },
+	},
+	MP: {
+		name: "MASS-PROD",
+		armor: [228, 228, 232],
+		accent: [205, 40, 64],
+		eyes: [255, 90, 110],
+		art: [
+			"     ▄▄▄     ",
+			"   ▄█████▄   ",
+			"  ▐███████▌  ",
+			"  ▐█▀▄▀▄▀█▌  ",
+			"   ▀▄▀▄▀▄▀   ",
+			"             ",
+			"             ",
+		],
+		mask: [
+			"             ",
+			"             ",
+			"             ",
+			"    eeeee    ",
+			"   eeeeeee   ",
+			"             ",
+			"             ",
+		],
+		jaw: { at: 3, rows: ["  ▐█▄▀▄▀▄█▌  ", "   ▄▀▄▀▄▀▄   "] },
+	},
+};
+
+const rgb = ([r, g, b]: Rgb, s: string) => `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
+const shade = (c: Rgb, k: number): Rgb => [Math.round(c[0] * k), Math.round(c[1] * k), Math.round(c[2] * k)];
+
+/** One EVA head: dormant (dark, eyes off), waking (eyes flicker, the jaw lock breaks), active (armor lit, eyes pulse). */
+function renderEvaHead(unit: EvaUnit, state: EvaState, frame: number): string[] {
+	const u = EVA[unit];
+	const jawOpen = state === "waking" && frame % 8 < 4;
+	const eyesOn = state === "active" || (state === "waking" && flicker(frame, 7));
+	const armor = state === "dormant" ? shade(u.armor, 0.3) : state === "waking" ? shade(u.armor, 0.7) : u.armor;
+	const accent = state === "dormant" ? shade(u.accent, 0.3) : u.accent;
+	const eyes = eyesOn ? shade(u.eyes, state === "active" ? 0.75 + 0.25 * Math.sin(frame / 3) : 1) : shade(u.eyes, 0.18);
+	return u.art.map((row, r) => {
+		const jaw = jawOpen ? u.jaw.rows[r - u.jaw.at] : undefined;
+		const art = jaw ?? row;
+		let out = "";
+		for (let c = 0; c < art.length; c++) {
+			const ch = art[c]!;
+			const m = u.mask[r]![c];
+			out += ch === " " ? " " : rgb(m === "e" ? eyes : m === "a" ? accent : armor, ch);
+		}
+		return out;
+	});
+}
+
+/** Unit-01 goes to the session's default model, 00 and 02 to the next real models, the rest is mass production. */
+function assignEvaUnits(realIds: string[], defaultRealId: string): Map<string, EvaUnit> {
+	const order = [...new Set(realIds.includes(defaultRealId) ? [defaultRealId, ...realIds] : realIds)];
+	const units: EvaUnit[] = ["01", "00", "02"];
+	return new Map(order.map((id, i) => [id, units[i] ?? "MP"]));
+}
 
 const MAGI_UNITS = ["MELCHIOR", "BALTHASAR", "CASPAR"] as const;
 type MagiUnit = (typeof MAGI_UNITS)[number];
@@ -583,15 +730,37 @@ async function refreshSwapActivity(): Promise<void> {
 	}
 }
 
-/**
- * Makes sure the session model is in VRAM. Any request under /upstream/<model>/ makes llama-swap
- * load the model if needed, and it only answers once the model is ready.
- */
-async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
+/** id → the model llama-swap actually runs for it: an alias (e.g. "… - Instruct") runs another model. */
+async function swapAliases(): Promise<Map<string, string>> {
+	const aliases = new Map<string, string>();
+	try {
+		const { data } = (await (await swapGet("/v1/models")).json()) as { data?: any[] };
+		for (const m of data ?? []) {
+			const ls = m.meta?.llamaswap;
+			aliases.set(m.id, ls?.type === "alias" && ls.modelID ? ls.modelID : m.id);
+		}
+	} catch {
+		// ids stay as they are
+	}
+	return aliases;
+}
+
+/** Models llama-swap keeps in memory: real id → "ready" | "starting" | … (empty when the server is unreachable). */
+async function swapRunning(): Promise<Map<string, string>> {
+	try {
+		const { running } = (await (await swapGet("/running")).json()) as { running?: { model: string; state: string }[] };
+		return new Map((running ?? []).map((r) => [r.model, r.state]));
+	} catch {
+		return new Map();
+	}
+}
+
+/** Points the llama-swap monitor at the server behind `model`, without loading anything; false when llama-swap doesn't serve it. */
+async function connectSwap(ctx: ExtensionContext, model: Model<any> | undefined): Promise<boolean> {
 	if (!model || model.provider !== "llama-swap" || !model.baseUrl) {
 		swap.base = "";
 		setSwapState("off");
-		return;
+		return false;
 	}
 	const id = model.id;
 	swap.modelId = id;
@@ -605,14 +774,25 @@ async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined
 	};
 	void refreshSwapMetrics();
 	void refreshSwapActivity();
-	// an alias (e.g. "… - Instruct") runs another model: /running lists that one
-	try {
-		const { data } = (await (await swapGet("/v1/models")).json()) as { data?: any[] };
-		const entry = data?.find((m) => m.id === id);
-		if (entry?.meta?.llamaswap?.type === "alias" && entry.meta.llamaswap.modelID) swap.realId = entry.meta.llamaswap.modelID;
-	} catch {
-		// keep the id itself
-	}
+	const realId = (await swapAliases()).get(id);
+	if (realId && swap.modelId === id) swap.realId = realId;
+	return true;
+}
+
+/** Shows whether the session model is already in VRAM or asleep, without loading it: typing wakes it. */
+async function probeModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
+	if (!(await connectSwap(ctx, model))) return;
+	const state = (await swapRunning()).get(swap.realId);
+	if (swap.modelId === model!.id) setSwapState(state === "ready" ? "ready" : "asleep");
+}
+
+/**
+ * Makes sure the session model is in VRAM. Any request under /upstream/<model>/ makes llama-swap
+ * load the model if needed, and it only answers once the model is ready.
+ */
+async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
+	if (!(await connectSwap(ctx, model))) return;
+	const id = model!.id;
 
 	// no answer within 400ms → the model isn't in VRAM and is being loaded
 	const slow = setTimeout(() => {
@@ -1336,6 +1516,73 @@ function buildReportView(theme: Theme, lines: string[], close: () => void) {
 	};
 }
 
+interface EvaEntry {
+	model: Model<any>;
+	unit: EvaUnit;
+	state: EvaState;
+}
+
+/** EVA SELECT: the model picker of a new session. The highlighted unit's head is animated by its real state in llama-swap. */
+function buildEvaPicker(tui: TUI, theme: Theme, entries: EvaEntry[], start: number, close: (picked: EvaEntry | undefined) => void) {
+	let frame = 0;
+	let index = start;
+	const timer = setInterval(() => {
+		frame++;
+		tui.requestRender();
+	}, 125);
+	const nameWidth = Math.max(...entries.map((e) => visibleWidth(e.model.id)));
+
+	return {
+		render(width: number): string[] {
+			const dim = (s: string) => theme.fg("dim", s);
+			const inner = Math.max(40, Math.min(width - 2, 96));
+			const row = (s: string) => {
+				const t = truncateToWidth(s, inner);
+				return theme.fg("accent", "║") + t + " ".repeat(Math.max(0, inner - visibleWidth(t))) + theme.fg("accent", "║");
+			};
+			const sel = entries[index]!;
+			const head = renderEvaHead(sel.unit, sel.state, frame);
+			const list = entries.map((e, i) => {
+				const u = EVA[e.unit];
+				const mark = i === index ? theme.fg("accent", "▸ ") : "  ";
+				const unit = rgb(e.state === "dormant" ? shade(u.armor, 0.6) : u.armor, u.name.padEnd(10));
+				const name = i === index ? theme.bold(theme.fg("text", e.model.id)) : theme.fg("muted", e.model.id);
+				const status =
+					e.state === "active" ? theme.fg("success", "● IN VRAM") : e.state === "waking" ? theme.fg("warning", "◌ WAKING") : dim("○ dormant");
+				return mark + unit + name + " ".repeat(nameWidth - visibleWidth(e.model.id) + 2) + status;
+			});
+			const u = EVA[sel.unit];
+			const sync =
+				sel.state === "active"
+					? theme.fg("success", `${u.name} · SYNC READY · no wait`)
+					: sel.state === "waking"
+						? theme.fg("warning", `${u.name} · ACTIVATION IN PROGRESS`)
+						: theme.fg("muted", `${u.name} · DORMANT · it will be loaded into VRAM`);
+
+			const out = [
+				theme.fg("accent", "╔" + "═".repeat(inner) + "╗"),
+				row(theme.bold(theme.fg("accent", " EVA SELECT")) + dim(" :: choose the unit to activate")),
+				theme.fg("accent", "╟" + "─".repeat(inner) + "╢"),
+			];
+			for (let r = 0; r < Math.max(head.length, list.length); r++) out.push(row(` ${head[r] ?? " ".repeat(13)}  ${list[r] ?? ""}`));
+			out.push(theme.fg("accent", "╟" + "─".repeat(inner) + "╢"), row(" " + sync), theme.fg("accent", "╚" + "═".repeat(inner) + "╝"));
+			out.push(dim(" ↑↓ select · enter: activate · esc: keep the current model, it loads when you type"));
+			return out.map((l) => truncateToWidth(l, width));
+		},
+		handleInput(data: string) {
+			if (matchesKey(data, "up")) index = (index + entries.length - 1) % entries.length;
+			else if (matchesKey(data, "down")) index = (index + 1) % entries.length;
+			else if (matchesKey(data, "enter")) close(entries[index]);
+			else if (matchesKey(data, "escape")) close(undefined);
+			tui.requestRender();
+		},
+		invalidate() {},
+		dispose() {
+			clearInterval(timer);
+		},
+	};
+}
+
 async function configureMagi(ctx: ExtensionContext): Promise<void> {
 	const cfg = loadMagiConfig();
 	const pool = ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : ctx.modelRegistry.getAvailable();
@@ -1616,7 +1863,42 @@ export default function (pi: ExtensionAPI) {
 	/** Tools currently executing, by call id: the golem shows one of them, and leaves when none is left. */
 	const runningTools = new Map<string, { name: string; target: string }>();
 
-	pi.on("session_start", async (_event, ctx) => {
+	/** The picker has the keyboard: keys pressed there must not wake the default model. */
+	let pickerOpen = false;
+
+	/** EVA SELECT on a new llama-swap session: nothing goes into VRAM until a unit is chosen. */
+	const pickModel = async (ctx: ExtensionContext) => {
+		const current = ctx.model!;
+		const models = ctx.modelRegistry.getAvailable().filter((m) => m.provider === "llama-swap");
+		if (models.length < 2) return;
+		pickerOpen = true;
+		try {
+			const [aliases, running] = await Promise.all([swapAliases(), swapRunning()]);
+			const realOf = (m: Model<any>) => aliases.get(m.id) ?? m.id;
+			const units = assignEvaUnits(models.map(realOf), realOf(current));
+			const rank: EvaUnit[] = ["01", "00", "02", "MP"];
+			const entries: EvaEntry[] = models
+				.map((model) => {
+					const st = running.get(realOf(model));
+					const evaState: EvaState = st === "ready" ? "active" : st === "starting" ? "waking" : "dormant";
+					return { model, unit: units.get(realOf(model))!, state: evaState };
+				})
+				.sort((a, b) => rank.indexOf(a.unit) - rank.indexOf(b.unit));
+			// a unit already in VRAM means no wait; otherwise the session's default model
+			let start = entries.findIndex((e) => e.state === "active");
+			if (start < 0) start = Math.max(0, entries.findIndex((e) => e.model.id === current.id));
+
+			const picked = await ctx.ui.custom<EvaEntry | undefined>((tui, theme, _keys, done) => buildEvaPicker(tui, theme, entries, start, done));
+			if (!picked) return;
+			// same model: pi emits no model_select, so load it here
+			if (picked.model.id === current.id) return void preloadModel(ctx, picked.model);
+			if (!(await pi.setModel(picked.model))) ctx.ui.notify(`${picked.model.id}: no credentials for llama-swap`, "error");
+		} finally {
+			pickerOpen = false;
+		}
+	};
+
+	pi.on("session_start", async (event, ctx) => {
 		liveCtx = ctx;
 		recountSession(ctx);
 		state.hasSmartCompact = pi.getCommands().some((c) => c.name.replace(/^\//, "") === "smart-compact");
@@ -1626,8 +1908,9 @@ export default function (pi: ExtensionAPI) {
 		ui.currency = cfg.ui?.currency === "USD" ? "USD" : "EUR";
 		if (ctx.mode !== "tui") return;
 		applyChrome(ctx);
-		// load the model into VRAM now (animated in the panel and footer)
-		void preloadModel(ctx);
+		// nothing is loaded at startup: a new session picks its EVA unit, a resumed one shows whether its model is in VRAM
+		const fresh = event.reason === "new" || (event.reason === "startup" && !ctx.sessionManager.getBranch().some((e) => e.type === "message"));
+		void probeModel(ctx).then(() => (fresh && chrome && swap.base ? pickModel(ctx) : undefined));
 		// GPU stats every 3s while something happens, every 30s when idle
 		metricsTimer ??= setInterval(() => {
 			const now = Date.now();
@@ -1644,7 +1927,7 @@ export default function (pi: ExtensionAPI) {
 				titleDone = false;
 				ctx.ui.setTitle(windowTitle(ctx.cwd));
 			}
-			if (swap.state === "asleep" && liveCtx) void preloadModel(liveCtx);
+			if (swap.state === "asleep" && liveCtx && !pickerOpen) void preloadModel(liveCtx);
 			return undefined;
 		});
 		// ponytail: re-applies the title every 2s because pi overwrites it without telling extensions
