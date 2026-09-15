@@ -1,6 +1,6 @@
 {
   "name": "pi-magi-theme",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "MAGI theme + extension for pi: Tree of Life header, three-model /magi council, golem tool animations, seven-seal context gauge, llama-swap telemetry",
   "keywords": [
     "pi-package",
