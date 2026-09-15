@@ -838,11 +838,83 @@ async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		if (swap.state === "loading") swap.loadMs = Date.now() - started;
 		setSwapState("ready");
+		if (!ctx.sessionManager.getBranch().some((e) => e.type === "message")) void prewarmPrefix(ctx.cwd);
 	} catch (err) {
 		if (swap.modelId === id) setSwapState("error", err instanceof Error ? err.message : String(err));
 	} finally {
 		clearTimeout(slow);
 		void refreshSwapMetrics();
+	}
+}
+
+/* ── prefix prewarm: a new session's system prompt and tools are processed before its first message ── */
+
+/**
+ * ~/.pi/agent/magi-prefix.json: "<project dir>\n<model id>" → the request body every new session shares
+ * (the system message, tools and request options of pi's last real request), so the prewarmed text is identical.
+ */
+const PREFIX_STORE_PATH = join(homedir(), ".pi", "agent", "magi-prefix.json");
+
+const prewarm = { state: "" as "" | "running" | "done", tokens: 0, ms: 0, abort: undefined as AbortController | undefined };
+let prefixMemo = "";
+
+function loadPrefixStore(): Record<string, any> {
+	try {
+		return JSON.parse(readFileSync(PREFIX_STORE_PATH, "utf8"));
+	} catch {
+		return {};
+	}
+}
+
+/** Keeps the shared part of pi's real llama-swap request; written only when it changes (new tools, another thinking level…). */
+function rememberPrefix(cwd: string, payload: any): void {
+	if (!swap.base || payload?.model !== swap.modelId || payload.messages?.[0]?.role !== "system") return;
+	const { stream, stream_options, max_tokens, max_completion_tokens, messages, ...options } = payload;
+	const body = { ...options, messages: [messages[0]] };
+	const json = JSON.stringify(body);
+	if (json === prefixMemo) return;
+	prefixMemo = json;
+	const store = loadPrefixStore();
+	store[`${cwd}\n${payload.model}`] = body;
+	writeFileSync(PREFIX_STORE_PATH, JSON.stringify(store));
+}
+
+/**
+ * Processes the stored prefix so llama-server checkpoints the state exactly where a new session's prompt diverges:
+ * the first message then costs its own tokens (seconds) instead of the whole system prompt and tools (~80s cold).
+ * ponytail: cuts at the ChatML user marker (Qwen and most llama.cpp templates); other templates are skipped.
+ */
+async function prewarmPrefix(cwd: string): Promise<void> {
+	const body = loadPrefixStore()[`${cwd}\n${swap.modelId}`];
+	if (!body || prewarm.state === "running") return;
+	const abort = new AbortController();
+	prewarm.abort = abort;
+	prewarm.state = "running";
+	const started = Date.now();
+	const post = async (path: string, json: unknown): Promise<any> =>
+		(
+			await fetch(`${swap.base}/upstream/${encodeURIComponent(swap.realId)}${path}`, {
+				method: "POST",
+				headers: { ...swap.headers, "Content-Type": "application/json" },
+				body: JSON.stringify(json),
+				signal: abort.signal,
+			})
+		).json();
+	try {
+		// the template renders only with a user turn: the prefix ends where that turn starts
+		const { prompt } = await post("/apply-template", { ...body, messages: [...body.messages, { role: "user", content: "." }] });
+		const cut = typeof prompt === "string" ? prompt.indexOf("<|im_start|>user") : -1;
+		if (cut <= 0) {
+			prewarm.state = "";
+			return;
+		}
+		const { timings } = await post("/completion", { prompt: prompt.slice(0, cut), n_predict: 1, cache_prompt: true });
+		prewarm.tokens = (timings?.prompt_n ?? 0) + (timings?.cache_n ?? 0);
+		prewarm.ms = Date.now() - started;
+		prewarm.state = "done";
+	} catch {
+		// aborted by the first message, or the server went away
+		prewarm.state = "";
 	}
 }
 
@@ -1182,7 +1254,13 @@ class MagiPanel implements Component {
 						? th.fg("error", "OFFLINE")
 						: th.fg("warning", swap.state === "loading" ? `LOADING ${secsSince(swap.since)}s` : "CHECKING");
 		const load = swap.state === "ready" && swap.loadMs ? th.fg("dim", ` load ${fmtMs(swap.loadMs)}`) : "";
-		out.push(this.frameLine(` ${th.fg("dim", "STATUS".padEnd(9))}${st}${load}`, inner));
+		const warm =
+			prewarm.state === "running"
+				? th.fg("warning", " · PREWARM")
+				: prewarm.state === "done"
+					? th.fg("dim", ` · ${fmtTokens(prewarm.tokens)} warm`)
+					: "";
+		out.push(this.frameLine(` ${th.fg("dim", "STATUS".padEnd(9))}${st}${load}${warm}`, inner));
 		if (compact) return [...out, this.costRow(inner)];
 		if (swap.state === "error") out.push(this.frameLine(" " + th.fg("error", swap.error), inner));
 		const gib = (n: number) => n / 2 ** 30;
@@ -1919,9 +1997,10 @@ export default function (pi: ExtensionAPI) {
 					return { model, unit: units.get(realOf(model))!, state: evaState };
 				})
 				.sort((a, b) => rank.indexOf(a.unit) - rank.indexOf(b.unit));
-			// a unit already in VRAM means no wait; otherwise the session's default model
-			let start = entries.findIndex((e) => e.state === "active");
-			if (start < 0) start = Math.max(0, entries.findIndex((e) => e.model.id === current.id));
+			// the session's model if it is in VRAM, else any unit already in VRAM (no wait), else the session's model
+			const own = entries.findIndex((e) => e.model.id === current.id);
+			let start = entries[own]?.state === "active" ? own : entries.findIndex((e) => e.state === "active");
+			if (start < 0) start = Math.max(0, own);
 
 			const picked = await ctx.ui.custom<EvaEntry | undefined>((tui, theme, _keys, done) => buildEvaPicker(tui, theme, entries, start, done));
 			if (!picked) return;
@@ -1983,12 +2062,17 @@ export default function (pi: ExtensionAPI) {
 		repaint();
 	});
 
+	pi.on("before_provider_request", (event, ctx) => {
+		rememberPrefix(ctx.cwd, event.payload);
+	});
+
 	pi.on("model_select", async (event, ctx) => {
 		liveCtx = ctx;
 		if (ctx.mode === "tui") void preloadModel(ctx, event.model);
 	});
 
 	pi.on("session_shutdown", async () => {
+		prewarm.abort?.abort();
 		clearInterval(metricsTimer);
 		metricsTimer = undefined;
 		unsubscribeInput?.();
@@ -2006,6 +2090,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_start", async (_event, ctx) => {
 		liveCtx = ctx;
+		prewarm.abort?.abort();
 		state.turns++;
 		setPhase("thinking");
 		if (ctx.mode === "tui" && chrome) ctx.ui.setWorkingMessage("the MAGI deliberate…");
