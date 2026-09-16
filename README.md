@@ -1,10 +1,10 @@
 # pi-magi-theme
 
-A three-mind council theme + extension for [pi](https://pi.dev): a detailed Tree of Life in the header, the three MAGI in a fixed side panel, live llama-swap telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
+A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM header, the three MAGI as their control screen in a fixed side panel, live llama-swap telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
 
-All artwork is original. The symbolism (the three Magi, the Tree of Life, the golem, the seven seals) is public domain.
+Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen belong to their creators, all rights reserved to khara, Inc. This project is not affiliated with them. The rest of the symbolism (the Tree of Life, the golem, the seven seals) is public domain.
 
-![pi with the MAGI theme: Tree of Life header, side panel with the MAGI triangle and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
+![pi with the MAGI theme: MAGI SYSTEM header, side panel with the MAGI screen and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
 
 ![The MAGI deliberating while the model thinks](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/deliberation.png)
 

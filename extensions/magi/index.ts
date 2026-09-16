@@ -2,7 +2,8 @@
  * MAGI — a three-mind council chrome for pi
  *
  * One public-domain mythology, every symbol bound to a real function:
- *  - the TREE OF LIFE shows where the agent is: the upper triad while it thinks, the light descending
+ *  - the panel draws the three MAGI as the panels of their control screen
+ *  - the sephirot of the Tree of Life show where the agent is: the upper triad while it thinks, the light descending
  *    to Malkuth while it answers, ascending while the model is loaded into VRAM, at rest in Malkuth when idle
  *  - the three MAGI (MELCHIOR / BALTHASAR / CASPAR) flicker while the agent works, showing what it is doing,
  *    and form the /magi council: three real models voting (on a question, or on the pending git diff)
@@ -10,12 +11,15 @@
  *    a failing tool erases the aleph and EMET becomes MET ("death"). SYNC is the tool success rate
  *  - CHESED (mercy) and GEBURAH (severity) count successful and failed tools
  *  - the SEVEN SEALS measure the context window; the sixth warns before compaction, the seventh opens when it runs
- *  - EVA SELECT: a new llama-swap session loads nothing until you pick the unit (model) to activate;
- *    each model gets an EVA head, lit when it is already in VRAM, waking while it loads
+ *  - MECHA SELECT: a new llama-swap session loads nothing until you pick the unit (model) to activate;
+ *    each model gets a MECHA head, lit when it is already in VRAM, waking while it loads;
+ *    /magi mecha reopens it
+ *  - while a model loads an angel attacks the MAGI: red spreads through BALTHASAR, MELCHIOR and CASPAR at the pace of
+ *    the model's last load, a corner of CASPAR holds out blinking; once loaded, blue takes the MAGI back from that corner
  *  - llama-swap telemetry: VRAM, GPU load/temp/power, energy used, RAM, server-side tok/s, prompt tok/s, cache hits
  *  - /magi config → assign a model to each MAGI; /magi-ui compact|status → smaller panel, llama-swap report
  *
- * Artwork is original; the symbolism is public domain.
+ * Fan art: the MAGI and their screen come from Neon Genesis Evangelion, all rights reserved to khara, Inc.
  * Use with the theme ../../themes/magi.json
  */
 
@@ -41,9 +45,14 @@ const MAGI_WORD = [
 	"╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝",
 ];
 
-/** Tree of Life canvas, in terminal cells; drawn with braille dots (2×4 sub-pixels per cell). */
-const TREE_W = 30;
-const TREE_H = 20;
+const SYSTEM_WORD = [
+	"███████╗██╗   ██╗███████╗████████╗███████╗███╗   ███╗",
+	"██╔════╝╚██╗ ██╔╝██╔════╝╚══██╔══╝██╔════╝████╗ ████║",
+	"███████╗ ╚████╔╝ ███████╗   ██║   █████╗  ██╔████╔██║",
+	"╚════██║  ╚██╔╝  ╚════██║   ██║   ██╔══╝  ██║╚██╔╝██║",
+	"███████║   ██║   ███████║   ██║   ███████╗██║ ╚═╝ ██║",
+	"╚══════╝   ╚═╝   ╚══════╝   ╚═╝   ╚══════╝╚═╝     ╚═╝",
+];
 
 /** Sephirot in the order of the "lightning flash" (Keter → Malkuth), positioned in sub-pixels. */
 const SEPHIROT = [
@@ -58,82 +67,6 @@ const SEPHIROT = [
 	{ name: "YESOD", meaning: "foundation", x: 30, y: 64 },
 	{ name: "MALKUTH", meaning: "the kingdom", x: 30, y: 75 },
 ] as const;
-
-/** Da'at, the hidden sephirah: drawn dashed, not part of the flash. */
-const DAAT = { x: 30, y: 28 };
-
-/** The 22 paths, as pairs of SEPHIROT indices. */
-const TREE_PATHS: readonly [number, number][] = [
-	[0, 1], [0, 2], [0, 5], [1, 2], [1, 5], [1, 3], [2, 5], [2, 4], [3, 4], [3, 5], [3, 6],
-	[4, 5], [4, 7], [5, 6], [5, 8], [5, 7], [6, 7], [6, 8], [6, 9], [7, 8], [7, 9], [8, 9],
-];
-
-const BRAILLE_BITS = [
-	[0x01, 0x08],
-	[0x02, 0x10],
-	[0x04, 0x20],
-	[0x40, 0x80],
-]; // [row][col] → dot bit
-
-/** Rasterizes the Tree of Life into braille: paths (muted), Da'at (dim, dashed), sephirot (accent rings). */
-function renderTreeOfLife(th: Theme): string[] {
-	const W = TREE_W * 2;
-	const H = TREE_H * 4;
-	const PATH = 1;
-	const DAAT_PX = 2;
-	const NODE = 3;
-	const px = new Uint8Array(W * H);
-	const set = (x: number, y: number, v: number) => {
-		const rx = Math.round(x);
-		const ry = Math.round(y);
-		if (rx >= 0 && ry >= 0 && rx < W && ry < H) px[ry * W + rx] = v;
-	};
-	for (const [a, b] of TREE_PATHS) {
-		const p = SEPHIROT[a]!;
-		const q = SEPHIROT[b]!;
-		const n = Math.ceil(Math.max(Math.abs(q.x - p.x), Math.abs(q.y - p.y)));
-		for (let i = 0; i <= n; i++) set(p.x + ((q.x - p.x) * i) / n, p.y + ((q.y - p.y) * i) / n, PATH);
-	}
-	// ring of radius r, cleared inside and with a small gap around it so paths stop short of the circle;
-	// dashed rings keep every other 30° arc
-	const ring = (c: { x: number; y: number }, r: number, v: number, dashed: boolean) => {
-		for (let y = -r - 2; y <= r + 2; y++) {
-			for (let x = -r - 2; x <= r + 2; x++) {
-				const d = Math.hypot(x, y);
-				if (d > r + 1.5) continue;
-				const onRing = d > r - 0.7 && d <= r + 0.5;
-				const arc = Math.floor((Math.atan2(y, x) + Math.PI) / (Math.PI / 6)) % 2 === 0;
-				set(c.x + x, c.y + y, onRing && (!dashed || arc) ? v : 0);
-			}
-		}
-	};
-	ring(DAAT, 3, DAAT_PX, true);
-	for (const s of SEPHIROT) {
-		ring(s, 3.5, NODE, false);
-		set(s.x, s.y, NODE);
-	}
-
-	const lines: string[] = [];
-	for (let row = 0; row < TREE_H; row++) {
-		let line = "";
-		for (let col = 0; col < TREE_W; col++) {
-			let bits = 0;
-			let top = 0;
-			for (let dy = 0; dy < 4; dy++) {
-				for (let dx = 0; dx < 2; dx++) {
-					const v = px[(row * 4 + dy) * W + col * 2 + dx]!;
-					if (!v) continue;
-					bits |= BRAILLE_BITS[dy]![dx]!;
-					top = Math.max(top, v);
-				}
-			}
-			const ch = bits ? String.fromCharCode(0x2800 + bits) : " ";
-			line += bits ? th.fg(top === NODE ? "accent" : top === DAAT_PX ? "dim" : "muted", ch) : ch;
-		}
-		lines.push(line);
-	}
-	return lines;
-}
 
 type NodeLight = "off" | "on" | "hot";
 
@@ -180,10 +113,10 @@ const GOLEM_FALLEN = [
 	"     ▀▀▀▀  ▀▀▀▀     ",
 ];
 
-/* ── EVA units: the heads of the model picker, one unit per model llama-swap runs ── */
+/* ── MECHA units: the heads of the model picker, one unit per model llama-swap runs ── */
 
-type EvaUnit = "01" | "00" | "02" | "MP";
-type EvaState = "dormant" | "waking" | "active";
+type MechaUnit = "I" | "II" | "III" | "LEGION";
+type MechaState = "dormant" | "waking" | "active";
 type Rgb = readonly [number, number, number];
 
 /**
@@ -191,9 +124,9 @@ type Rgb = readonly [number, number, number];
  * jaw: rows that replace the art from row `at` while the unit wakes (the jaw lock breaks).
  * Colors are the units' own, outside the theme palette on purpose.
  */
-const EVA: Record<EvaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; art: string[]; mask: string[]; jaw: { at: number; rows: string[] } }> = {
-	"01": {
-		name: "UNIT-01",
+const MECHA: Record<MechaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; art: string[]; mask: string[]; jaw: { at: number; rows: string[] } }> = {
+	"I": {
+		name: "MECHA-I",
 		armor: [124, 82, 196],
 		accent: [132, 222, 84],
 		eyes: [170, 255, 120],
@@ -217,8 +150,8 @@ const EVA: Record<EvaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; a
 		],
 		jaw: { at: 5, rows: ["  ▀█▀▀▀▀▀█▀  ", "   █▄▀▄▀▄█   "] },
 	},
-	"00": {
-		name: "UNIT-00",
+	"II": {
+		name: "MECHA-II",
 		armor: [236, 140, 44],
 		accent: [90, 160, 255],
 		eyes: [120, 200, 255],
@@ -242,8 +175,8 @@ const EVA: Record<EvaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; a
 		],
 		jaw: { at: 5, rows: ["    ▀▄▀▄▀    "] },
 	},
-	"02": {
-		name: "UNIT-02",
+	"III": {
+		name: "MECHA-III",
 		armor: [214, 40, 44],
 		accent: [245, 160, 40],
 		eyes: [120, 255, 160],
@@ -267,8 +200,8 @@ const EVA: Record<EvaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; a
 		],
 		jaw: { at: 4, rows: ["  ▀█▀▄▀▄▀█▀  ", "   ▀▄▀▄▀▄▀   "] },
 	},
-	MP: {
-		name: "MASS-PROD",
+	LEGION: {
+		name: "LEGION",
 		armor: [228, 228, 232],
 		accent: [205, 40, 64],
 		eyes: [255, 90, 110],
@@ -297,9 +230,9 @@ const EVA: Record<EvaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rgb; a
 const rgb = ([r, g, b]: Rgb, s: string) => `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
 const shade = (c: Rgb, k: number): Rgb => [Math.round(c[0] * k), Math.round(c[1] * k), Math.round(c[2] * k)];
 
-/** One EVA head: dormant (dark, eyes off), waking (eyes flicker, the jaw lock breaks), active (armor lit, eyes pulse). */
-function renderEvaHead(unit: EvaUnit, state: EvaState, frame: number): string[] {
-	const u = EVA[unit];
+/** One MECHA head: dormant (dark, eyes off), waking (eyes flicker, the jaw lock breaks), active (armor lit, eyes pulse). */
+function renderMechaHead(unit: MechaUnit, state: MechaState, frame: number): string[] {
+	const u = MECHA[unit];
 	const jawOpen = state === "waking" && frame % 8 < 4;
 	const eyesOn = state === "active" || (state === "waking" && flicker(frame, 7));
 	const armor = state === "dormant" ? shade(u.armor, 0.3) : state === "waking" ? shade(u.armor, 0.7) : u.armor;
@@ -318,11 +251,27 @@ function renderEvaHead(unit: EvaUnit, state: EvaState, frame: number): string[] 
 	});
 }
 
-/** Unit-01 goes to the session's default model, 00 and 02 to the next real models, the rest is mass production. */
-function assignEvaUnits(realIds: string[], defaultRealId: string): Map<string, EvaUnit> {
+/** MECHA-I goes to the default model, II and III to the next real models, the rest is the LEGION. */
+function assignMechaUnits(realIds: string[], defaultRealId: string): Map<string, MechaUnit> {
 	const order = [...new Set(realIds.includes(defaultRealId) ? [defaultRealId, ...realIds] : realIds)];
-	const units: EvaUnit[] = ["01", "00", "02"];
-	return new Map(order.map((id, i) => [id, units[i] ?? "MP"]));
+	const units: MechaUnit[] = ["I", "II", "III"];
+	return new Map(order.map((id, i) => [id, units[i] ?? "LEGION"]));
+}
+
+/**
+ * The unit of every llama-swap model, stable across /model switches: MECHA-I is settings.json's defaultModel.
+ * ponytail: reads only the global settings, a project .pi/settings.json override is ignored.
+ */
+function mechaUnitsOf(ctx: ExtensionContext, aliases: Map<string, string>): Map<string, MechaUnit> {
+	let def = ctx.model?.id ?? "";
+	try {
+		def = JSON.parse(readFileSync(join(homedir(), ".pi", "agent", "settings.json"), "utf8")).defaultModel || def;
+	} catch {
+		// no settings: the session model leads
+	}
+	const realOf = (id: string) => aliases.get(id) ?? id;
+	const ids = ctx.modelRegistry.getAvailable().filter((m) => m.provider === "llama-swap").map((m) => realOf(m.id));
+	return assignMechaUnits(ids, realOf(def));
 }
 
 const MAGI_UNITS = ["MELCHIOR", "BALTHASAR", "CASPAR"] as const;
@@ -409,6 +358,7 @@ function animating(now = Date.now()): boolean {
 		state.phase !== "idle" ||
 		swap.state === "checking" ||
 		swap.state === "loading" ||
+		(swap.state === "ready" && now - swap.since < ONLINE_MS) ||
 		state.compacting ||
 		now - state.rebornAt < REBIRTH_MS ||
 		now - state.lastFailAt < FAIL_FLASH_MS
@@ -536,75 +486,177 @@ interface UnitView {
 
 const MAGI_DIAGRAM_WIDTH = 32;
 
-/**
- * The three MAGI wired in a triangle: BALTHASAR on top, CASPAR bottom-left, MELCHIOR bottom-right,
- * joined through the central hub. Always exactly 32 cells wide.
- */
-function magiDiagram(th: Theme, top: UnitView, left: UnitView, right: UnitView, link: ThemeColor, hub: string): string[] {
-	const center = (s: string) => {
-		const w = visibleWidth(s);
-		const l = Math.max(0, Math.floor((10 - w) / 2));
-		return " ".repeat(l) + s + " ".repeat(Math.max(0, 10 - w - l));
-	};
-	const edge = (u: UnitView, s: string) => th.fg(u.lit ? u.tone : "dim", s);
-	const name = (u: UnitView) => (u.lit ? th.bold(th.fg(u.tone, center(u.name))) : th.fg("muted", center(u.name)));
-	const stat = (u: UnitView) => th.fg(u.lit ? u.tone : "dim", center(u.status));
-	const L = (s: string) => th.fg(link, s);
-	const sp = (n: number) => " ".repeat(n);
+/* ── MAGI screen: pixel art drawn with half blocks, two pixels per cell (one above the other) ── */
 
-	return [
-		sp(10) + edge(top, "┌──────────┐") + sp(10),
-		sp(6) + L("╭───") + edge(top, "┤") + name(top) + edge(top, "├") + L("───╮") + sp(6),
-		sp(6) + L("│") + sp(3) + edge(top, "│") + stat(top) + edge(top, "│") + sp(3) + L("│") + sp(6),
-		sp(6) + L("│") + sp(3) + edge(top, "└──────────┘") + sp(3) + L("│") + sp(6),
-		" " + edge(left, "┌────") + L("┴") + edge(left, "─────┐") + sp(6) + edge(right, "┌─────") + L("┴") + edge(right, "────┐") + " ",
-		" " + edge(left, "│") + name(left) + edge(left, "│") + L(hub) + edge(right, "│") + name(right) + edge(right, "│") + " ",
-		" " + edge(left, "│") + stat(left) + edge(left, "│") + sp(6) + edge(right, "│") + stat(right) + edge(right, "│") + " ",
-		" " + edge(left, "└──────────┘") + sp(6) + edge(right, "└──────────┘") + " ",
+/**
+ * The three MAGI as the panels of their control screen, 32×20 pixels: B = BALTHASAR, C = CASPAR, M = MELCHIOR
+ * (CASPAR and MELCHIOR are mirror images), o = the wires joining them.
+ */
+const MAGI_SCREEN = [
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"..........BBBBBBBBBBBB..........",
+	"...........BBBBBBBBBB...........",
+	"...........oBBBBBBBBo...........",
+	"CCCCCCCC..oo.BBBBBB.oo..MMMMMMMM",
+	"CCCCCCCCCoo..........ooMMMMMMMMM",
+	"CCCCCCCCCC............MMMMMMMMMM",
+	"CCCCCCCCCCC..........MMMMMMMMMMM",
+	"CCCCCCCCCCCC........MMMMMMMMMMMM",
+	"CCCCCCCCCCCCC......MMMMMMMMMMMMM",
+	"CCCCCCCCCCCCC......MMMMMMMMMMMMM",
+	"CCCCCCCCCCCCCooooooMMMMMMMMMMMMM",
+	"CCCCCCCCCCCCC......MMMMMMMMMMMMM",
+	"CCCCCCCCCCCCC......MMMMMMMMMMMMM",
+];
+
+interface ScreenLabel {
+	row: number;
+	center: number;
+	text: string;
+	fg: string; // SGR foreground escape
+}
+
+const SCREEN_TEAL = "\x1b[38;2;64;180;220m";
+const SCREEN_TEAL_DARK = "\x1b[38;2;22;62;78m";
+const SCREEN_INK = "\x1b[38;2;10;10;10m";
+const SGR_RESET = "\x1b[0m";
+const toBg = (fg: string) => fg.replace("[38;", "[48;");
+
+/** Paints each pixel of a rows×2 by cols grid, then writes the labels in bold over whatever is under them. */
+function renderScreen(rows: number, cols: number, at: (y: number, x: number) => string | undefined, labels: readonly ScreenLabel[]): string[] {
+	const cells = Array.from({ length: rows }, (_, r) =>
+		Array.from({ length: cols }, (_, c) => {
+			const top = at(r * 2, c);
+			const bot = at(r * 2 + 1, c);
+			if (!top && !bot) return " ";
+			if (top === bot) return top + "█" + SGR_RESET;
+			if (top && bot) return top + toBg(bot) + "▀" + SGR_RESET;
+			return top ? top + "▀" + SGR_RESET : bot + "▄" + SGR_RESET;
+		}),
+	);
+	for (const l of labels) {
+		const chars = [...l.text];
+		const start = Math.round(l.center - chars.length / 2);
+		chars.forEach((ch, i) => {
+			const c = start + i;
+			const row = cells[l.row];
+			if (!row || c < 0 || c >= row.length) return;
+			const under = at(l.row * 2, c);
+			row[c] = (under ? toBg(under) : "") + l.fg + "\x1b[1m" + ch + SGR_RESET;
+		});
+	}
+	return cells.map((r) => r.join(""));
+}
+
+/* ── the angel attack: red spreads through the MAGI while a model loads, blue takes them back when it is ready ── */
+
+const SCREEN_RED = "\x1b[38;2;206;36;24m";
+/** CASPAR's bottom-left corner: the red never gets there; once everything else has fallen it blinks until the model is loaded. */
+const SAFE_PIXELS = new Set(["18,0", "18,1", "19,0", "19,1"]);
+const LOAD_DEFAULT_MS = 60_000;
+const RECOVER_MS = 1_600;
+const ONLINE_MS = 3_000;
+
+/** Blocky noise (2×2 pixel blocks), stable across renders: makes the front ragged like a corrupted screen. */
+const blockNoise = (y: number, x: number) => {
+	const h = Math.sin(Math.floor(y / 2) * 127.1 + Math.floor(x / 2) * 311.7) * 43758.5453;
+	return h - Math.floor(h);
+};
+
+/** Pixel → 0..1 order in which it falls: BALTHASAR, then MELCHIOR, then CASPAR, each from where the previous one touches it. */
+const INFECTION_ORDER: ReadonlyMap<string, number> = (() => {
+	const entry: Record<string, { unit: number; y: number; x: number }> = {
+		B: { unit: 0, y: 0, x: 10 },
+		M: { unit: 1, y: 10, x: 22 },
+		C: { unit: 2, y: 10, x: 9 },
+	};
+	const byUnit = new Map<string, { key: string; d: number }[]>();
+	MAGI_SCREEN.forEach((row, y) =>
+		[...row].forEach((ch, x) => {
+			const e = entry[ch];
+			if (!e || SAFE_PIXELS.has(`${y},${x}`)) return;
+			const list = byUnit.get(ch) ?? [];
+			list.push({ key: `${y},${x}`, d: Math.hypot(y - e.y, x - e.x) + blockNoise(y, x) * 7 });
+			byUnit.set(ch, list);
+		}),
+	);
+	const order = new Map<string, number>();
+	for (const [ch, list] of byUnit) {
+		list.sort((a, b) => a.d - b.d);
+		list.forEach((p, i) => order.set(p.key, (entry[ch]!.unit + i / list.length) / 3));
+	}
+	return order;
+})();
+
+/** Pixel → 0..1 order in which blue takes it back, spreading from the safe corner. */
+const RECOVERY_ORDER: ReadonlyMap<string, number> = (() => {
+	const list: { key: string; d: number }[] = [];
+	MAGI_SCREEN.forEach((row, y) =>
+		[...row].forEach((ch, x) => {
+			if ("BCM".includes(ch)) list.push({ key: `${y},${x}`, d: Math.hypot(y - 19, x) + blockNoise(y, x) * 7 });
+		}),
+	);
+	list.sort((a, b) => a.d - b.d);
+	return new Map(list.map((p, i) => [p.key, i / list.length]));
+})();
+
+/** How far the attack went (0..1) and how far the recovery is (0..1); blink toggles the safe corner. */
+interface Virus {
+	infected: number;
+	recovered: number;
+	blink: boolean;
+}
+
+/**
+ * The MAGI screen with each unit's name and status: a lit unit is filled (blue, or its state's color),
+ * a dark one is dimmed; the wires and the hub stay orange. 32×10 cells.
+ */
+function magiDiagram(th: Theme, top: UnitView, left: UnitView, right: UnitView, hub: string, virus?: Virus): string[] {
+	const fill = (u: UnitView) => (!u.lit ? SCREEN_TEAL_DARK : u.tone === "accent" ? SCREEN_TEAL : th.getFgAnsi(u.tone));
+	const ink = (u: UnitView) => (u.lit ? SCREEN_INK : th.getFgAnsi("muted"));
+	const wire = th.getFgAnsi("accent");
+	const unit = (u: UnitView, row: number, name: number, status: number): ScreenLabel[] => [
+		{ row, center: name, text: u.name, fg: ink(u) },
+		{ row: row + 1, center: status, text: u.status, fg: ink(u) },
 	];
+	const paint: Record<string, string> = { B: fill(top), C: fill(left), M: fill(right), o: wire };
+	const at = (y: number, x: number) => {
+		const ch = MAGI_SCREEN[y]![x]!;
+		if (virus && ch !== "o" && ch !== ".") {
+			const key = `${y},${x}`;
+			// the last stronghold: it blinks only once everything else has fallen, until the recovery starts
+			if (SAFE_PIXELS.has(key)) return virus.infected >= 1 && virus.recovered <= 0 && virus.blink ? SCREEN_TEAL_DARK : SCREEN_TEAL;
+			if ((INFECTION_ORDER.get(key) ?? 1) < virus.infected && (RECOVERY_ORDER.get(key) ?? 0) >= virus.recovered) return SCREEN_RED;
+		}
+		return paint[ch];
+	};
+	return renderScreen(
+		10,
+		MAGI_DIAGRAM_WIDTH,
+		at,
+		[...unit(top, 2, 16, 16), ...unit(left, 7, 6, 6), ...unit(right, 7, 26, 26), { row: 7, center: 16, text: hub, fg: wire }],
+	);
 }
 
 /* ─────────────────────────────────────────────────────────── header ── */
 
 /** Static header: it scrolls away with the conversation, so nothing here animates. */
 function buildHeader(theme: Theme) {
-	const tree = renderTreeOfLife(theme);
-
 	return {
 		render(width: number): string[] {
 			const orange = (s: string) => theme.fg("accent", s);
-			const dim = (s: string) => theme.fg("dim", s);
-			const muted = (s: string) => theme.fg("muted", s);
-			const triad = MAGI_UNITS.map((u) => theme.fg("success", u)).join(dim(" · "));
-			const subtitle = "KETER → MALKUTH · 10 SEPHIROT · 22 PATHS";
-			const lore = "THE MAGI JUDGE · THE GOLEM ACTS · THE SEALS KEEP TIME";
-
-			// Narrow layout: a single identification line.
-			if (width < 44) {
-				return ["", orange(theme.bold("◆ MAGI")) + dim(" // ") + triad, ""].map((l) => truncateToWidth(l, width));
-			}
-
-			// Medium layout: tree on top, wordmark below.
-			if (width < 70) {
-				const lines = ["", ...tree, ""];
-				for (const l of MAGI_WORD) lines.push(orange(l));
-				lines.push(dim("├─ ") + triad + dim(" ─┤"), muted(subtitle), dim(lore), "");
-				return lines.map((l) => truncateToWidth(l, width));
-			}
-
-			// Wide layout: tree left, wordmark right (rows chosen to center the text block on the tree).
-			const [wordAt, triadAt] = [5, 12];
-			const lines = [""];
-			for (let i = 0; i < tree.length; i++) {
-				let right = "";
-				if (i >= wordAt && i < wordAt + MAGI_WORD.length) right = orange(MAGI_WORD[i - wordAt]!);
-				else if (i === triadAt) right = dim("├─ ") + triad + dim(" ─┤");
-				else if (i === triadAt + 1) right = muted(subtitle);
-				else if (i === triadAt + 2) right = dim(lore);
-				lines.push(truncateToWidth(tree[i]! + "    " + right, width));
-			}
-			lines.push("");
-			return lines;
+			const note = theme.fg("dim", "fan-art theme inspired by Neon Genesis Evangelion · all rights reserved to khara, Inc.");
+			let word: string[];
+			if (width >= MAGI_WORD[0]!.length + 4 + SYSTEM_WORD[0]!.length) word = MAGI_WORD.map((l, i) => l + "    " + SYSTEM_WORD[i]);
+			else if (width >= SYSTEM_WORD[0]!.length) word = [...MAGI_WORD, ...SYSTEM_WORD];
+			else word = [theme.bold("◆ MAGI SYSTEM")];
+			return ["", ...word.map(orange), note, ""].map((l) => truncateToWidth(l, width));
 		},
 		invalidate() {},
 	};
@@ -632,6 +684,8 @@ const swap = {
 	state: "off" as SwapState,
 	since: 0, // when the current state started
 	loadMs: 0, // how long the last real load took
+	expectedLoadMs: LOAD_DEFAULT_MS, // how long this model took to load last time
+	infection: 0, // how far the red went when the model became ready (0 = it was already in VRAM)
 	error: "",
 	gpus: [] as GpuStat[],
 	ramUsed: 0,
@@ -807,8 +861,9 @@ async function connectSwap(ctx: ExtensionContext, model: Model<any> | undefined)
 	};
 	void refreshSwapMetrics();
 	void refreshSwapActivity();
-	const realId = (await swapAliases()).get(id);
-	if (realId && swap.modelId === id) swap.realId = realId;
+	const aliases = await swapAliases();
+	if (swap.modelId !== id) return true;
+	swap.realId = aliases.get(id) ?? id;
 	return true;
 }
 
@@ -826,6 +881,7 @@ async function probeModel(ctx: ExtensionContext, model: Model<any> | undefined =
 async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
 	if (!(await connectSwap(ctx, model))) return;
 	const id = model!.id;
+	swap.expectedLoadMs = loadMagiConfig().loads?.[swap.realId] ?? LOAD_DEFAULT_MS;
 
 	// no answer within 400ms → the model isn't in VRAM and is being loaded
 	const slow = setTimeout(() => {
@@ -836,7 +892,13 @@ async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined
 		const res = await swapGet(`/upstream/${encodeURIComponent(id)}/health`, 15 * 60_000);
 		if (swap.modelId !== id) return; // the model changed meanwhile
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		if (swap.state === "loading") swap.loadMs = Date.now() - started;
+		const loaded = swap.state === "loading";
+		if (loaded) {
+			swap.loadMs = Date.now() - started;
+			swap.infection = Math.min(1, swap.loadMs / swap.expectedLoadMs);
+			const cfg = loadMagiConfig();
+			saveMagiConfig({ ...cfg, loads: { ...cfg.loads, [swap.realId]: swap.loadMs } });
+		} else swap.infection = 0;
 		setSwapState("ready");
 		if (!ctx.sessionManager.getBranch().some((e) => e.type === "message")) void prewarmPrefix(ctx.cwd);
 	} catch (err) {
@@ -1094,40 +1156,44 @@ class MagiPanel implements Component {
 		} else {
 			let word: string;
 			let tone: ThemeColor;
-			let link: ThemeColor = "dim";
 			let hub = "─MAGI─";
 			let lit = (i: number) => flicker(f, i);
+			let virus: Virus | undefined;
 			const breathing = ["─MAGI─", "━MAGI━"][f % 2]!;
 
 			if (state.compacting) {
 				title = `COMPACTING · ${state.compactBy || "context"} · ${secs(state.compactSince)}`;
-				[word, tone, link, hub, titleTone] = ["COMPACTING", "warning", "warning", ["─SEAL─", "━SEAL━"][f % 2]!, "warning"];
+				[word, tone, hub, titleTone] = ["COMPACTING", "warning", ["─SEAL─", "━SEAL━"][f % 2]!, "warning"];
 			} else if (now - state.rebornAt < REBIRTH_MS) {
 				title = "SEVENTH SEAL OPENED";
-				[word, tone, link, hub, titleTone] = ["REBORN", "success", "success", "═MAGI═", "success"];
+				[word, tone, hub, titleTone] = ["REBORN", "success", "═MAGI═", "success"];
 				lit = () => true;
 			} else if (idle && (swap.state === "checking" || swap.state === "loading")) {
 				title = swap.state === "loading" ? `LOADING MODEL · ${secs(swap.since)}` : "CHECKING MODEL";
-				[word, tone, link, hub, titleTone] = ["LOADING", "warning", "warning", breathing, "warning"];
+				[word, tone, hub, titleTone] = ["LOADING", "accent", breathing, "warning"];
+				lit = () => true;
+				if (swap.state === "loading")
+					virus = { infected: Math.min(1, (now - swap.since) / swap.expectedLoadMs), recovered: 0, blink: f % 4 < 2 };
 			} else if (idle && swap.state === "error") {
 				title = "MAGI OFFLINE";
-				[word, tone, link, hub, titleTone] = ["OFFLINE", "error", "error", "─ ╳ ──", "error"];
+				[word, tone, hub, titleTone] = ["OFFLINE", "error", "─ ╳ ──", "error"];
 				lit = () => f % 16 < 8;
 			} else if (idle && swap.state === "asleep") {
 				title = "MODEL ASLEEP · type to wake";
 				[word, tone, titleTone] = ["ASLEEP", "muted", "muted"];
 				lit = () => false;
-			} else if (idle && swap.state === "ready" && now - swap.since < 3000) {
+			} else if (idle && swap.state === "ready" && now - swap.since < ONLINE_MS) {
 				title = swap.loadMs ? `MAGI ONLINE · ${fmtMs(swap.loadMs)}` : "MAGI ONLINE";
-				[word, tone, link, hub, titleTone] = ["ONLINE", "success", "success", "═MAGI═", "success"];
+				[word, tone, hub, titleTone] = ["ONLINE", "accent", "═MAGI═", "success"];
 				lit = () => true;
+				virus = { infected: swap.infection, recovered: (now - swap.since) / RECOVER_MS, blink: f % 4 < 2 };
 			} else if (state.phase === "thinking") {
 				title = `THINKING · ${secs(state.phaseSince)}`;
-				[word, tone, link, hub] = ["THINKING", "accent", "accent", breathing];
+				[word, tone, hub] = ["THINKING", "accent", breathing];
 			} else if (state.phase === "responding") {
 				const tps = liveTps();
 				title = `RESPONDING${tps ? ` · ${tps.toFixed(1)} tok/s` : ""}`;
-				[word, tone, link, hub, titleTone] = ["RESPONDING", "success", "success", breathing, "success"];
+				[word, tone, hub, titleTone] = ["RESPONDING", "success", breathing, "success"];
 			} else {
 				title = "STANDBY";
 				[word, tone, titleTone] = ["STANDBY", "muted", "muted"];
@@ -1135,7 +1201,7 @@ class MagiPanel implements Component {
 			}
 
 			const units = MAGI_UNITS.map((name, i) => ({ name, status: word, tone, lit: lit(i) }));
-			body = magiDiagram(th, units[1]!, units[2]!, units[0]!, link, hub);
+			body = magiDiagram(th, units[1]!, units[2]!, units[0]!, hub, virus);
 			const c = state.lastCouncil;
 			status = c
 				? `${pulse} ${th.fg("dim", "COUNCIL ")}${th.fg(voteTone(c.verdict), `${c.verdict ?? "NO QUORUM"} ${c.tally}/3`)}`
@@ -1386,7 +1452,10 @@ interface MagiUnitConfig {
 	model?: string;
 	thinking?: string;
 }
-type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & { ui?: { compact?: boolean; kwhPrice?: number; currency?: Currency } };
+type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
+	ui?: { compact?: boolean; kwhPrice?: number; currency?: Currency };
+	loads?: Record<string, number>; // real model id → ms its last load took
+};
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
 
@@ -1572,10 +1641,9 @@ function buildDeliberationView(
 				return { name, status: o.vote === "CONDITIONAL" ? "COND." : o.vote, tone: voteTone(o.vote), lit: true };
 			});
 			const { verdict, tally } = tallyVerdict(opinions.map((o) => o?.vote ?? null));
-			const link: ThemeColor = done ? voteTone(verdict) : "accent";
 			const hub = done ? "◆MAGI◆" : ["─MAGI─", "━MAGI━"][tick % 2]!;
 			const left = " ".repeat(Math.max(0, Math.floor((inner - MAGI_DIAGRAM_WIDTH) / 2)));
-			for (const l of magiDiagram(theme, units[1]!, units[2]!, units[0]!, link, hub)) out.push(row(left + l));
+			for (const l of magiDiagram(theme, units[1]!, units[2]!, units[0]!, hub)) out.push(row(left + l));
 
 			out.push(row(""));
 			for (let i = 0; i < MAGI.length; i++) {
@@ -1628,14 +1696,14 @@ function buildReportView(theme: Theme, lines: string[], close: () => void) {
 	};
 }
 
-interface EvaEntry {
+interface MechaEntry {
 	model: Model<any>;
-	unit: EvaUnit;
-	state: EvaState;
+	unit: MechaUnit;
+	state: MechaState;
 }
 
-/** EVA SELECT: the model picker of a new session. The highlighted unit's head is animated by its real state in llama-swap. */
-function buildEvaPicker(tui: TUI, theme: Theme, entries: EvaEntry[], start: number, close: (picked: EvaEntry | undefined) => void) {
+/** MECHA SELECT: the model picker of a new session. The highlighted unit's head is animated by its real state in llama-swap. */
+function buildMechaPicker(tui: TUI, theme: Theme, entries: MechaEntry[], start: number, close: (picked: MechaEntry | undefined) => void) {
 	let frame = 0;
 	let index = start;
 	const timer = setInterval(() => {
@@ -1653,9 +1721,9 @@ function buildEvaPicker(tui: TUI, theme: Theme, entries: EvaEntry[], start: numb
 				return theme.fg("accent", "║") + t + " ".repeat(Math.max(0, inner - visibleWidth(t))) + theme.fg("accent", "║");
 			};
 			const sel = entries[index]!;
-			const head = renderEvaHead(sel.unit, sel.state, frame);
+			const head = renderMechaHead(sel.unit, sel.state, frame);
 			const list = entries.map((e, i) => {
-				const u = EVA[e.unit];
+				const u = MECHA[e.unit];
 				const mark = i === index ? theme.fg("accent", "▸ ") : "  ";
 				const unit = rgb(e.state === "dormant" ? shade(u.armor, 0.6) : u.armor, u.name.padEnd(10));
 				const name = i === index ? theme.bold(theme.fg("text", e.model.id)) : theme.fg("muted", e.model.id);
@@ -1663,17 +1731,17 @@ function buildEvaPicker(tui: TUI, theme: Theme, entries: EvaEntry[], start: numb
 					e.state === "active" ? theme.fg("success", "● IN VRAM") : e.state === "waking" ? theme.fg("warning", "◌ WAKING") : dim("○ dormant");
 				return mark + unit + name + " ".repeat(nameWidth - visibleWidth(e.model.id) + 2) + status;
 			});
-			const u = EVA[sel.unit];
+			const u = MECHA[sel.unit];
 			const sync =
 				sel.state === "active"
 					? theme.fg("success", `${u.name} · SYNC READY · no wait`)
 					: sel.state === "waking"
-						? theme.fg("warning", `${u.name} · ACTIVATION IN PROGRESS`)
+						? theme.fg("warning", `${u.name} · LIFT OFF`)
 						: theme.fg("muted", `${u.name} · DORMANT · it will be loaded into VRAM`);
 
 			const out = [
 				theme.fg("accent", "╔" + "═".repeat(inner) + "╗"),
-				row(theme.bold(theme.fg("accent", " EVA SELECT")) + dim(" :: choose the unit to activate")),
+				row(theme.bold(theme.fg("accent", " MECHA SELECT")) + dim(" :: choose the unit to activate")),
 				theme.fg("accent", "╟" + "─".repeat(inner) + "╢"),
 			];
 			for (let r = 0; r < Math.max(head.length, list.length); r++) out.push(row(` ${head[r] ?? " ".repeat(13)}  ${list[r] ?? ""}`));
@@ -1979,7 +2047,7 @@ export default function (pi: ExtensionAPI) {
 	/** The picker has the keyboard: keys pressed there must not wake the default model. */
 	let pickerOpen = false;
 
-	/** EVA SELECT on a new llama-swap session: nothing goes into VRAM until a unit is chosen. */
+	/** MECHA SELECT on a new llama-swap session: nothing goes into VRAM until a unit is chosen. */
 	const pickModel = async (ctx: ExtensionContext) => {
 		const current = ctx.model!;
 		const models = ctx.modelRegistry.getAvailable().filter((m) => m.provider === "llama-swap");
@@ -1988,13 +2056,13 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const [aliases, running] = await Promise.all([swapAliases(), swapRunning()]);
 			const realOf = (m: Model<any>) => aliases.get(m.id) ?? m.id;
-			const units = assignEvaUnits(models.map(realOf), realOf(current));
-			const rank: EvaUnit[] = ["01", "00", "02", "MP"];
-			const entries: EvaEntry[] = models
+			const units = mechaUnitsOf(ctx, aliases);
+			const rank: MechaUnit[] = ["I", "II", "III", "LEGION"];
+			const entries: MechaEntry[] = models
 				.map((model) => {
 					const st = running.get(realOf(model));
-					const evaState: EvaState = st === "ready" ? "active" : st === "starting" ? "waking" : "dormant";
-					return { model, unit: units.get(realOf(model))!, state: evaState };
+					const mechaState: MechaState = st === "ready" ? "active" : st === "starting" ? "waking" : "dormant";
+					return { model, unit: units.get(realOf(model))!, state: mechaState };
 				})
 				.sort((a, b) => rank.indexOf(a.unit) - rank.indexOf(b.unit));
 			// the session's model if it is in VRAM, else any unit already in VRAM (no wait), else the session's model
@@ -2002,7 +2070,7 @@ export default function (pi: ExtensionAPI) {
 			let start = entries[own]?.state === "active" ? own : entries.findIndex((e) => e.state === "active");
 			if (start < 0) start = Math.max(0, own);
 
-			const picked = await ctx.ui.custom<EvaEntry | undefined>((tui, theme, _keys, done) => buildEvaPicker(tui, theme, entries, start, done));
+			const picked = await ctx.ui.custom<MechaEntry | undefined>((tui, theme, _keys, done) => buildMechaPicker(tui, theme, entries, start, done));
 			if (!picked) return;
 			// same model: pi emits no model_select, so load it here
 			if (picked.model.id === current.id) return void preloadModel(ctx, picked.model);
@@ -2022,7 +2090,7 @@ export default function (pi: ExtensionAPI) {
 		ui.currency = cfg.ui?.currency === "USD" ? "USD" : "EUR";
 		if (ctx.mode !== "tui") return;
 		applyChrome(ctx);
-		// nothing is loaded at startup: a new session picks its EVA unit, a resumed one shows whether its model is in VRAM
+		// nothing is loaded at startup: a new session picks its MECHA unit, a resumed one shows whether its model is in VRAM
 		const fresh = event.reason === "new" || (event.reason === "startup" && !ctx.sessionManager.getBranch().some((e) => e.type === "message"));
 		void probeModel(ctx).then(() => (fresh && chrome && swap.base ? pickModel(ctx) : undefined));
 		// GPU stats every 3s while something happens, every 30s when idle
@@ -2265,10 +2333,15 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("magi", {
-		description: "Ask the three MAGI (pragmatist, guardian, visionary); /magi review [focus] judges the git diff; /magi config assigns models",
+		description: "Ask the three MAGI (pragmatist, guardian, visionary); /magi review [focus] judges the git diff; /magi config assigns models; /magi mecha picks the model",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (arg === "config") return configureMagi(ctx);
+			if (arg === "mecha") {
+				if (ctx.mode !== "tui" || !swap.base) return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap model", "error");
+				liveCtx = ctx;
+				return pickModel(ctx);
+			}
 
 			if (arg === "review" || arg.startsWith("review ")) {
 				const focus = arg.slice("review".length).trim();
