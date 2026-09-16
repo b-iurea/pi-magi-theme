@@ -39,6 +39,7 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi <question>` | the council answers a question (recent conversation as context) |
 | `/magi review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
 | `/magi config` | pick a model for each MAGI |
+| `/magi mecha` | MECHA SELECT: pick the llama-swap model to activate, each shown as a mecha head lit by its real state |
 | `/magi-ui compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
 | `/magi-ui status` | llama-swap report from its last 100 requests: speed, tokens, cache hits, MTP draft acceptance, durations, errors per model |
 | `/magi-ui config` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
@@ -54,7 +55,10 @@ Every symbol stands for something real the agent is doing.
 | light descending Tiferet → Malkuth | manifestation | the model is **streaming the answer** (with live tok/s) | footer |
 | light ascending Malkuth → Keter | ascent | the model is **being loaded into VRAM** | footer |
 | Malkuth at rest | the kingdom | **idle**, with the last run duration | footer |
-| MELCHIOR · BALTHASAR · CASPAR flickering | the three Magi at work | what the agent **is doing** (thinking, responding, loading, compacting); below them, the **last real `/magi` verdict** | panel |
+| MELCHIOR · BALTHASAR · CASPAR flickering | the three Magi at work | what the agent **is doing** (thinking, responding, compacting); below them, the **last real `/magi` verdict** | panel |
+| red spreading through BALTHASAR, MELCHIOR, CASPAR | an angel hacking the MAGI | the model is **being loaded into VRAM**, at the pace of its last load; CASPAR's last corner blinks once everything else has fallen | panel |
+| blue taking the MAGI back from that corner | the attack repelled | the model is **loaded** | panel |
+| MECHA-I · II · III · LEGION | units waiting for a pilot | the **llama-swap models**: dormant, waking while loading, eyes lit in VRAM | MECHA SELECT |
 | the golem, EMET ("truth") | a clay servant that acts | a **tool is running**, with the file or command it works on | panel + footer |
 | the golem, MET ("death") | the aleph is erased | a **tool failed** | panel + footer |
 | SYNC | the golem's obedience | **tool success rate** | panel + footer |
@@ -99,19 +103,24 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 ```json
 {
   "MELCHIOR": { "model": "llama-swap/Qwen3.8 27B Q4_K_M - Thinking", "thinking": "low" },
-  "ui": { "compact": false, "kwhPrice": 0.30, "currency": "EUR" }
+  "ui": { "compact": false, "kwhPrice": 0.30, "currency": "EUR" },
+  "loads": { "qwen3.8-27b": 41200 }
 }
 ```
 
 - per MAGI: `model` (unset = current session model) and optional `thinking` level;
 - `ui.compact`: start with the compact side panel;
-- `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy used in the session by this price.
+- `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy used in the session by this price;
+- `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
 
 ## llama-swap
 
 When the session model uses the `llama-swap` provider, the side panel:
 
-- loads the model into VRAM on startup and on model change (`GET /upstream/<model>/health`), with a MAGI boot animation;
+- loads nothing at startup: a new session opens MECHA SELECT, a resumed one shows whether its model is already in VRAM;
+- loads the model into VRAM when you pick it, change it with `/model` or type (`GET /upstream/<model>/health`), with the angel attack animation;
+- prewarms a new session: pi's real system prompt and tools are processed as soon as the model is ready, so the first answer doesn't wait for them;
+- follows the context live in the seven seals while the model works (`/upstream/<model>/slots`);
 - notices when llama-swap unloads the model (`/running`), shows it asleep and reloads it as soon as you type;
 - shows VRAM, GPU load/temperature/power, RAM and the GPU energy used in the session from `/metrics` (every 3s while working, every 30s when idle);
 - shows server-measured tok/s, prompt tok/s and KV cache hits of the last request (`/api/metrics/activity?limit=1`).

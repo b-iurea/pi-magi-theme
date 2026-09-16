@@ -1,14 +1,14 @@
 {
   "name": "pi-magi-theme",
-  "version": "0.1.4",
-  "description": "MAGI theme + extension for pi: Tree of Life header, three-model /magi council, golem tool animations, seven-seal context gauge, llama-swap telemetry",
+  "version": "0.2.0",
+  "description": "MAGI SYSTEM theme + extension for pi (Evangelion fan art): MAGI control screen panel, three-model /magi council, MECHA SELECT model picker, angel-attack loading, seven-seal context gauge, llama-swap telemetry",
   "keywords": [
     "pi-package",
     "pi-extension",
     "pi-theme",
     "pi",
     "magi",
-    "tree-of-life",
+    "evangelion",
     "llama-swap"
   ],
   "author": "b-iurea",
