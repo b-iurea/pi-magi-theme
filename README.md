@@ -4,9 +4,9 @@ A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM h
 
 Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen belong to their creators, all rights reserved to khara, Inc. This project is not affiliated with them. The rest of the symbolism (the Tree of Life, the golem, the seven seals) is public domain.
 
-![pi with the MAGI theme: MAGI SYSTEM header, side panel with the MAGI screen and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
+![pi with the MAGI theme: MAGI SYSTEM header, MECHA SELECT model picker, side panel with the MAGI screen and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
 
-![The MAGI deliberating while the model thinks](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/deliberation.png)
+![The angel attack: red spreads through the MAGI while the model loads into VRAM](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/angel-attack.png)
 
 ## Install
 
