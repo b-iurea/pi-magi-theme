@@ -45,6 +45,22 @@ const MAGI_WORD = [
 	"╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝",
 ];
 
+/** The seven-eyed seal, 26×11 cells of braille, traced from the original emblem. */
+const SEELE_LOGO = [
+	" ⠹⡍⠉⠉⠉⠉⠉⠉⠉⠉⠉⢹⠉⠉⠉⠉⠉⠉⠉⣉⡉⠉⢩⠇",
+	"⣠⠖⠛⢩⠋⠉⢯⠙⠲⢤⡀ ⢸  ⢠⣴⠚⠉⡝⠉⠙⡍⠙⢲⣤",
+	" ⠙⠒⠾⡷⠴⠿⠖⠚⠁  ⢸   ⠈⠙⠒⠻⠶⣾⠗⠚⠉",
+	" ⢀⣠⣤⣼⢦⣤⣤⣀   ⢸   ⢀⣀⡤⢤⠴⢧⠤⣄⣀",
+	"⠺⢭⣀⣸⡁ ⣽⣀⣨⠽⠂ ⢸  ⠐⠫⢤⣀⣯⡀⣠⣇⣀⡬⠓",
+	"   ⠉⠉⠉⠙⣇    ⢸     ⡼⠉⠉⠉⠉",
+	"⣠⠖⠚⢩⠏⠉⢯⠙⠓⢦⡀ ⢸  ⢀⡴⠚⠋⡽⠉⠙⡍⠓⠲⣄",
+	" ⠙⠒⠾⠷⠴⠿⠖⠚⢧  ⢸  ⢀⡼⠛⠒⠿⠦⠾⠗⠚⠉",
+	"         ⠈⢧ ⢸ ⢀⡞ ⣀⣤⢤⡤⣤⣤⣄⡀",
+	"          ⠈⢧⢸⢀⡞⠐⠯⣅⣀⣯ ⢈⣇⣀⡭⠗",
+	"            ⢻⡟    ⠈⠉⠉⠉⠉",
+];
+const SEELE_WIDTH = 26;
+
 const SYSTEM_WORD = [
 	"███████╗██╗   ██╗███████╗████████╗███████╗███╗   ███╗",
 	"██╔════╝╚██╗ ██╔╝██╔════╝╚══██╔══╝██╔════╝████╗ ████║",
@@ -652,11 +668,27 @@ function buildHeader(theme: Theme) {
 		render(width: number): string[] {
 			const orange = (s: string) => theme.fg("accent", s);
 			const note = theme.fg("dim", "fan-art theme inspired by Neon Genesis Evangelion · all rights reserved to khara, Inc.");
-			let word: string[];
-			if (width >= MAGI_WORD[0]!.length + 4 + SYSTEM_WORD[0]!.length) word = MAGI_WORD.map((l, i) => l + "    " + SYSTEM_WORD[i]);
-			else if (width >= SYSTEM_WORD[0]!.length) word = [...MAGI_WORD, ...SYSTEM_WORD];
-			else word = [theme.bold("◆ MAGI SYSTEM")];
-			return ["", ...word.map(orange), note, ""].map((l) => truncateToWidth(l, width));
+			const oneLine = MAGI_WORD.map((l, i) => l + "    " + SYSTEM_WORD[i]);
+			const stacked = [...MAGI_WORD, "", ...SYSTEM_WORD];
+			const word = width >= SEELE_WIDTH + 4 + oneLine[0]!.length ? oneLine : stacked;
+
+			let lines: string[];
+			if (width >= SEELE_WIDTH + 4 + word[0]!.length) {
+				// the seal on the left of the wordmark, both centered on the taller one
+				const h = Math.max(SEELE_LOGO.length, word.length);
+				const sealAt = Math.floor((h - SEELE_LOGO.length) / 2);
+				const wordAt = Math.floor((h - word.length) / 2);
+				lines = Array.from({ length: h }, (_, i) => {
+					const seal = (SEELE_LOGO[i - sealAt] ?? "").padEnd(SEELE_WIDTH);
+					const w = word[i - wordAt];
+					return theme.fg("text", seal) + (w ? "    " + orange(w) : "");
+				});
+			} else if (width >= SYSTEM_WORD[0]!.length) {
+				lines = stacked.map(orange);
+			} else {
+				lines = [orange(theme.bold("◆ MAGI SYSTEM"))];
+			}
+			return ["", ...lines, note, ""].map((l) => truncateToWidth(l, width));
 		},
 		invalidate() {},
 	};
