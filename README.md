@@ -2,7 +2,7 @@
 
 A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM header, the three MAGI as their control screen in a fixed side panel, live llama-swap telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
 
-Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen belong to their creators, all rights reserved to khara, Inc. This project is not affiliated with them. The rest of the symbolism (the Tree of Life, the golem, the seven seals) is public domain.
+Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen belong to their creators, all rights reserved to khara, Inc. This project is not affiliated with them. The rest of the symbolism (the Tree of Life, the sephirot, the seven seals) is public domain.
 
 ![pi with the MAGI theme: MAGI SYSTEM header, MECHA SELECT model picker, side panel with the MAGI screen and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
 
@@ -59,9 +59,9 @@ Every symbol stands for something real the agent is doing.
 | red spreading through BALTHASAR, MELCHIOR, CASPAR | an angel hacking the MAGI | the model is **being loaded into VRAM**, at the pace of its last load; CASPAR's last corner blinks once everything else has fallen | panel |
 | blue taking the MAGI back from that corner | the attack repelled | the model is **loaded** | panel |
 | MECHA-I · II · III · LEGION | units waiting for a pilot | the **llama-swap models**: dormant, waking while loading, eyes lit in VRAM | MECHA SELECT |
-| the golem, EMET ("truth") | a clay servant that acts | a **tool is running**, with the file or command it works on | panel + footer |
-| the golem, MET ("death") | the aleph is erased | a **tool failed** | panel + footer |
-| SYNC | the golem's obedience | **tool success rate** | panel + footer |
+| the session's unit, in sync | the unit acts under its pilot | a **tool is running**, with the file or command it works on | panel + footer |
+| the unit going berserk | the leash breaks: red eyes, jaw wide open | a **tool failed** | panel + footer |
+| SYNC | the unit's sync ratio | **tool success rate** | panel + footer |
 | CHESED ✓ / GEBURAH ✗ | mercy / severity | **successful / failed tools** | panel + footer |
 | the seven seals | the end of an age | **context window usage**, one seal per seventh | panel |
 | the sixth seal blinking | the last warning | context **close to compaction**: compact now instead of mid-task | panel + footer |

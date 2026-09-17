@@ -7,7 +7,7 @@
  *    to Malkuth while it answers, ascending while the model is loaded into VRAM, at rest in Malkuth when idle
  *  - the three MAGI (MELCHIOR / BALTHASAR / CASPAR) flicker while the agent works, showing what it is doing,
  *    and form the /magi council: three real models voting (on a question, or on the pending git diff)
- *  - the GOLEM acts: it is animated by EMET ("truth") while tools run, showing the file or command it works on;
+ *  - the session's MECHA unit acts while tools run, showing the file or command it works on, and goes berserk when one fails;
  *    a failing tool erases the aleph and EMET becomes MET ("death"). SYNC is the tool success rate
  *  - CHESED (mercy) and GEBURAH (severity) count successful and failed tools
  *  - the SEVEN SEALS measure the context window; the sixth warns before compaction, the seventh opens when it runs
@@ -97,42 +97,10 @@ function renderPath(th: Theme, lights: NodeLight[]): string {
 	return out;
 }
 
-/** The golem, 20×8 cells: at rest, striking (arms raised), and fallen (EMET → MET). */
-const GOLEM_REST = [
-	"      ▄██████▄      ",
-	"      █ EMET █      ",
-	"      ▀██████▀      ",
-	"   ▄████████████▄   ",
-	"   ██ ████████ ██   ",
-	"   ▀▀ ████████ ▀▀   ",
-	"      ███  ███      ",
-	"     ▀▀▀▀  ▀▀▀▀     ",
-];
-const GOLEM_STRIKE = [
-	" ▄▄   ▄██████▄   ▄▄ ",
-	" ██   █ EMET █   ██ ",
-	" ██   ▀██████▀   ██ ",
-	" ▀████████████████▀ ",
-	"      ████████      ",
-	"      ████████      ",
-	"      ███  ███      ",
-	"     ▀▀▀▀  ▀▀▀▀     ",
-];
-const GOLEM_FALLEN = [
-	"      ▄██████▄      ",
-	"      █  MET █      ",
-	"      ▀██████▀      ",
-	"   ▄████████████▄   ",
-	"   ██ ██░███░█ ██   ",
-	"   ▀▀ █░████░█ ▀▀   ",
-	"      ███  ███      ",
-	"     ▀▀▀▀  ▀▀▀▀     ",
-];
-
 /* ── MECHA units: the heads of the model picker, one unit per model llama-swap runs ── */
 
 type MechaUnit = "I" | "II" | "III" | "LEGION";
-type MechaState = "dormant" | "waking" | "active";
+type MechaState = "dormant" | "waking" | "active" | "berserk";
 type Rgb = readonly [number, number, number];
 
 /**
@@ -243,17 +211,31 @@ const MECHA: Record<MechaUnit, { name: string; armor: Rgb; accent: Rgb; eyes: Rg
 	},
 };
 
+/** Every head is drawn on the same 13×7 grid. */
+const MECHA_W = 13;
+
 const rgb = ([r, g, b]: Rgb, s: string) => `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
 const shade = (c: Rgb, k: number): Rgb => [Math.round(c[0] * k), Math.round(c[1] * k), Math.round(c[2] * k)];
 
-/** One MECHA head: dormant (dark, eyes off), waking (eyes flicker, the jaw lock breaks), active (armor lit, eyes pulse). */
+/** The berserk eyes: the unit off its leash sees in red, whatever colour its own eyes are. */
+const BERSERK_EYES: Rgb = [255, 40, 40];
+
+/**
+ * One MECHA head: dormant (dark, eyes off), waking (eyes flicker, the jaw lock breaks),
+ * active (armor lit, eyes pulse), berserk (jaw wide open, red eyes, a tool just failed).
+ */
 function renderMechaHead(unit: MechaUnit, state: MechaState, frame: number): string[] {
 	const u = MECHA[unit];
-	const jawOpen = state === "waking" && frame % 8 < 4;
-	const eyesOn = state === "active" || (state === "waking" && flicker(frame, 7));
+	const jawOpen = state === "berserk" || (state === "waking" && frame % 8 < 4);
+	const eyesOn = state === "active" || state === "berserk" || (state === "waking" && flicker(frame, 7));
 	const armor = state === "dormant" ? shade(u.armor, 0.3) : state === "waking" ? shade(u.armor, 0.7) : u.armor;
 	const accent = state === "dormant" ? shade(u.accent, 0.3) : u.accent;
-	const eyes = eyesOn ? shade(u.eyes, state === "active" ? 0.75 + 0.25 * Math.sin(frame / 3) : 1) : shade(u.eyes, 0.18);
+	const eyes =
+		state === "berserk"
+			? shade(BERSERK_EYES, 0.7 + 0.3 * Math.sin(frame / 1.5)) // the roar throbs faster than the sync pulse
+			: eyesOn
+				? shade(u.eyes, state === "active" ? 0.75 + 0.25 * Math.sin(frame / 3) : 1)
+				: shade(u.eyes, 0.18);
 	return u.art.map((row, r) => {
 		const jaw = jawOpen ? u.jaw.rows[r - u.jaw.at] : undefined;
 		const art = jaw ?? row;
@@ -323,6 +305,7 @@ const state = {
 	turns: 0,
 	toolOk: 0, // CHESED
 	toolFail: 0, // GEBURAH
+	unit: "I" as MechaUnit, // the session model's own unit: it is the one that acts while a tool runs
 	lastFailAt: 0,
 	lastFailTool: "",
 	lastFailTarget: "",
@@ -362,7 +345,7 @@ const REBIRTH_MS = 6000;
 const DONE_TITLE_AFTER_MS = 30_000;
 const SIXTH_SEAL_PERCENT = (6 / 7) * 100;
 
-/** Golem obedience: share of tool calls that succeeded (null before the first tool). */
+/** Sync ratio: share of tool calls that succeeded (null before the first tool). */
 function syncPercent(): number | null {
 	const done = state.toolOk + state.toolFail;
 	return done ? (state.toolOk / done) * 100 : null;
@@ -1147,23 +1130,18 @@ class MagiPanel implements Component {
 		return this.frameLine(" " + l + this.theme.fg(tone, value), inner);
 	}
 
-	/* ── the golem: tools ── */
+	/* ── the unit at work: tools ── */
 
-	private golemArt(inner: number): string[] {
-		const th = this.theme;
-		const fallen = Date.now() - state.lastFailAt < FAIL_FLASH_MS;
-		const art = fallen ? GOLEM_FALLEN : this.frame % 4 < 2 ? GOLEM_STRIKE : GOLEM_REST;
-		const tone: ThemeColor = fallen ? "error" : "accent";
-		const left = " ".repeat(Math.max(0, Math.floor((inner - 20) / 2)));
-		return art.map((line) => {
-			const word = fallen ? "MET" : "EMET";
-			const at = line.indexOf(word);
-			if (at < 0) return left + th.fg(tone, line);
-			return left + th.fg(tone, line.slice(0, at)) + th.bold(th.fg(fallen ? "error" : "warning", word)) + th.fg(tone, line.slice(at + word.length));
-		});
+	/** The session's own unit while a tool runs; berserk (and shaking) for as long as the failure flashes. */
+	private mechaArt(inner: number): string[] {
+		const berserk = Date.now() - state.lastFailAt < FAIL_FLASH_MS;
+		const art = renderMechaHead(state.unit, berserk ? "berserk" : "active", this.frame);
+		const shake = berserk ? (this.frame % 2 ? 1 : -1) : 0;
+		const left = " ".repeat(Math.max(0, Math.floor((inner - MECHA_W) / 2) + shake));
+		return art.map((line) => left + line);
 	}
 
-	/* ── top of the panel: the MAGI (flickering while working) or the golem (tools) ── */
+	/* ── top of the panel: the MAGI (flickering while working) or the unit (tools) ── */
 
 	private councilSection(inner: number): string[] {
 		const th = this.theme;
@@ -1180,9 +1158,10 @@ class MagiPanel implements Component {
 		let status: string;
 
 		if (state.phase === "tool" || (idle && fallen)) {
-			title = fallen ? `GOLEM FELL · MET · ${state.lastFailTool}` : `GOLEM · ${state.toolName || "tool"} · ${secs(state.phaseSince)}`;
+			const name = MECHA[state.unit].name;
+			title = fallen ? `${name} BERSERK · ${state.lastFailTool}` : `${name} · ${state.toolName || "tool"} · ${secs(state.phaseSince)}`;
 			titleTone = fallen ? "error" : "warning";
-			body = this.golemArt(inner);
+			body = this.mechaArt(inner);
 			const target = (fallen ? state.lastFailTarget || state.lastFailTool : state.toolTarget || state.toolName) || "tool";
 			status = `${pulse} ${th.fg(fallen ? "error" : "text", truncateToWidth(target, inner - 4))}`;
 		} else {
@@ -1275,7 +1254,7 @@ class MagiPanel implements Component {
 			if (tokens.cost) out.push(this.field("API COST", `$${tokens.cost.toFixed(3)}`, inner, "muted"));
 		}
 
-		// SYNC: the golem's obedience = tool success rate (CHESED ✓ / GEBURAH ✗)
+		// SYNC: the unit's sync ratio = tool success rate (CHESED ✓ / GEBURAH ✗)
 		const sync = syncPercent();
 		out.push(
 			this.frameLine(
@@ -1818,7 +1797,7 @@ async function configureMagi(ctx: ExtensionContext): Promise<void> {
 /**
  * The footer's left side, one animation per real state of the agent:
  *  - seals breaking / seventh seal opened → context compaction
- *  - golem EMET / MET                     → tool running (with its file or command) / tool failed
+ *  - unit in sync / berserk               → tool running (with its file or command) / tool failed
  *  - light pulsing in the upper triad     → thinking
  *  - light descending to Malkuth          → streaming the answer
  *  - light ascending from Malkuth         → loading the model into VRAM
@@ -1856,13 +1835,22 @@ function footerLeft(th: Theme, now = Date.now()): string {
 		const syncText = sync === null ? "" : dim(" · sync ") + th.fg(syncTone(sync), `${sync.toFixed(0)}%`);
 		if (now - state.lastFailAt < FAIL_FLASH_MS) {
 			const target = state.lastFailTarget ? dim(" ") + th.fg("error", truncateToWidth(state.lastFailTarget, 40)) : "";
-			return th.fg("error", "✗ GOLEM · MET") + dim(" · ") + th.fg("error", `${state.lastFailTool} failed`) + target + dim(" ·") + tally + syncText;
+			return (
+				th.fg("error", `✗ ${MECHA[state.unit].name} · `) +
+				th.bold(th.fg("error", "BERSERK")) +
+				dim(" · ") +
+				th.fg("error", `${state.lastFailTool} failed`) +
+				target +
+				dim(" ·") +
+				tally +
+				syncText
+			);
 		}
-		const hammer = ["▚", "▞"][step % 2]!;
+		const roar = ["▚", "▞"][step % 2]!;
 		const target = state.toolTarget ? dim(" ") + th.fg("muted", truncateToWidth(state.toolTarget, 40)) : "";
 		return (
-			th.fg("accent", `${hammer} GOLEM · `) +
-			th.bold(th.fg("warning", "EMET")) +
+			th.fg("accent", `${roar} ${MECHA[state.unit].name} · `) +
+			th.bold(th.fg("warning", "SYNC")) +
 			dim(" · ") +
 			th.fg("text", state.toolName || "tool") +
 			target +
@@ -2073,7 +2061,7 @@ export default function (pi: ExtensionAPI) {
 	let lastPoll = 0;
 	let titleTimer: ReturnType<typeof setInterval> | undefined;
 	let liveTimer: ReturnType<typeof setInterval> | undefined;
-	/** Tools currently executing, by call id: the golem shows one of them, and leaves when none is left. */
+	/** Tools currently executing, by call id: the unit shows one of them, and leaves when none is left. */
 	const runningTools = new Map<string, { name: string; target: string }>();
 
 	/** The picker has the keyboard: keys pressed there must not wake the default model. */
@@ -2112,8 +2100,20 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
+	/** Which unit acts in the panel: the one the picker gave this session's model. LEGION for anything not llama-swap. */
+	const refreshUnit = async (ctx: ExtensionContext, model: Model<any> | undefined = ctx.model) => {
+		if (!model) return;
+		try {
+			const aliases = await swapAliases();
+			state.unit = mechaUnitsOf(ctx, aliases).get(aliases.get(model.id) ?? model.id) ?? "LEGION";
+		} catch {
+			state.unit = "LEGION"; // llama-swap unreachable: no roster, so the unit is nameless
+		}
+	};
+
 	pi.on("session_start", async (event, ctx) => {
 		liveCtx = ctx;
+		void refreshUnit(ctx);
 		recountSession(ctx);
 		state.hasSmartCompact = pi.getCommands().some((c) => c.name.replace(/^\//, "") === "smart-compact");
 		const cfg = loadMagiConfig();
@@ -2168,6 +2168,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("model_select", async (event, ctx) => {
 		liveCtx = ctx;
+		void refreshUnit(ctx, event.model);
 		if (ctx.mode === "tui") void preloadModel(ctx, event.model);
 	});
 
@@ -2212,7 +2213,7 @@ export default function (pi: ExtensionAPI) {
 		if (t === "thinking_start" || t === "thinking_delta") setPhase("thinking");
 		else if (t === "text_start" || t === "text_delta") setPhase("responding");
 		else if (t === "toolcall_start" || t === "toolcall_delta") {
-			// the model is writing a tool call: the golem shows which tool it prepares, not the previous one
+			// the model is writing a tool call: the unit shows which tool it prepares, not the previous one
 			setPhase("tool");
 			const call = e.partial?.content?.[e.contentIndex];
 			if (call?.type === "toolCall") {
@@ -2259,7 +2260,7 @@ export default function (pi: ExtensionAPI) {
 		repaint();
 	});
 
-	// CHESED (mercy) counts what worked, GEBURAH (severity) what failed; a failure erases the golem's aleph.
+	// CHESED (mercy) counts what worked, GEBURAH (severity) what failed; a failure throws the unit berserk.
 	pi.on("tool_execution_end", async (event) => {
 		const tool = runningTools.get(event.toolCallId);
 		runningTools.delete(event.toolCallId);
@@ -2273,7 +2274,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const next = [...runningTools.values()][0];
 		if (next) {
-			// parallel tools: the golem moves on to one still running
+			// parallel tools: the unit moves on to one still running
 			state.toolName = next.name;
 			state.toolTarget = next.target;
 		} else {
