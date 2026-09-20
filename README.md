@@ -117,6 +117,16 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
 - `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
 
+## Release
+
+`.github/workflows/publish.yml` publishes to npm when a `v*` tag is pushed, and refuses if the tag does not match `package.json`:
+
+```
+npm version patch && git push --follow-tags
+```
+
+No token: npmjs is configured to trust this repository's `publish.yml` (npm trusted publishing, OIDC), which also signs the provenance.
+
 ## llama-swap
 
 When the session model uses the `llama-swap` provider, the side panel:
