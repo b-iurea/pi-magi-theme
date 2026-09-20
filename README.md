@@ -106,13 +106,15 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 {
   "MELCHIOR": { "model": "llama-swap/Qwen3.8 27B Q4_K_M - Thinking", "thinking": "low" },
   "ui": { "compact": false, "kwhPrice": 0.30, "currency": "EUR" },
-  "loads": { "qwen3.8-27b": 41200 }
+  "loads": { "qwen3.8-27b": 41200 },
+  "totalWh": 1843.2
 }
 ```
 
 - per MAGI: `model` (unset = current session model) and optional `thinking` level;
 - `ui.compact`: start with the compact side panel;
-- `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy used in the session by this price;
+- `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy by this price, showing the running total of every session with the current one in brackets;
+- `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
 - `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
 
 ## llama-swap

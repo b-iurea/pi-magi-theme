@@ -715,6 +715,8 @@ const swap = {
 	cacheTokens: 0,
 	inputTokens: 0,
 	energyWh: 0, // GPU energy since the session started
+	diskWh: 0, // GPU energy of all sessions, as last read from/written to magi.json
+	savedWh: 0, // the part of energyWh already added to diskWh
 	lastSampleAt: 0,
 	lastWatts: 0,
 };
@@ -765,6 +767,34 @@ function sampleEnergy(now = Date.now()): void {
 	}
 	swap.lastSampleAt = now;
 	swap.lastWatts = watts;
+	persistEnergy();
+}
+
+/** GPU energy of every session so far: what is on disk plus this session's not-yet-written part. */
+function totalWh(): number {
+	return swap.diskWh + swap.energyWh - swap.savedWh;
+}
+
+const ENERGY_SAVE_MS = 60_000;
+let lastPersistAt = 0;
+
+/**
+ * Adds this session's new energy to the running total in magi.json, so the COST row survives restarts.
+ * ponytail: writes at most once a minute, and adds a delta so parallel sessions do not overwrite each other.
+ */
+function persistEnergy(force = false): void {
+	const delta = swap.energyWh - swap.savedWh;
+	if (delta <= 0 || (!force && Date.now() - lastPersistAt < ENERGY_SAVE_MS)) return;
+	lastPersistAt = Date.now();
+	const cfg = loadMagiConfig();
+	cfg.totalWh = (cfg.totalWh ?? 0) + delta;
+	try {
+		saveMagiConfig(cfg);
+	} catch {
+		return; // disk unavailable: keep the delta and retry on the next sample
+	}
+	swap.savedWh = swap.energyWh;
+	swap.diskWh = cfg.totalWh;
 }
 
 async function refreshSwapMetrics(): Promise<void> {
@@ -1316,11 +1346,14 @@ class MagiPanel implements Component {
 		return out;
 	}
 
-	/** COST: GPU energy used in the session × price per kWh set with /magi-ui config. */
+	/** COST: GPU energy × price per kWh set with /magi-ui config — all sessions, with this one in brackets. */
 	private costRow(inner: number): string {
 		if (!swap.gpus.length) return this.field("COST", "—", inner, "muted");
 		if (ui.kwhPrice === undefined) return this.field("COST", "→ /magi-ui config", inner, "dim");
-		return this.field("COST", fmtMoney((swap.energyWh / 1000) * ui.kwhPrice), inner, "warning");
+		const th = this.theme;
+		const price = (wh: number) => fmtMoney((wh / 1000) * ui.kwhPrice!);
+		const label = th.fg("dim", "COST".padEnd(9));
+		return this.frameLine(" " + label + th.fg("warning", price(totalWh())) + th.fg("dim", ` (ses ${price(swap.energyWh)})`), inner);
 	}
 
 	private swapRows(inner: number, compact: boolean): string[] {
@@ -1362,7 +1395,7 @@ class MagiPanel implements Component {
 			);
 		}
 		if (swap.ramTotal) out.push(this.field("RAM", `${gib(swap.ramUsed).toFixed(1)} / ${Math.round(gib(swap.ramTotal))}G`, inner, "muted"));
-		if (swap.gpus.length) out.push(this.field("ENERGY", `${(swap.energyWh / 1000).toFixed(3)} kWh`, inner, "muted"));
+		if (swap.gpus.length) out.push(this.field("ENERGY", `${(totalWh() / 1000).toFixed(3)} kWh`, inner, "muted"));
 		out.push(this.costRow(inner));
 		return out;
 	}
@@ -1471,6 +1504,7 @@ interface MagiUnitConfig {
 type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 	ui?: { compact?: boolean; kwhPrice?: number; currency?: Currency };
 	loads?: Record<string, number>; // real model id → ms its last load took
+	totalWh?: number; // GPU energy summed over every session, for the COST row
 };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
@@ -2154,6 +2188,7 @@ export default function (pi: ExtensionAPI) {
 		ui.compact = cfg.ui?.compact ?? false;
 		ui.kwhPrice = cfg.ui?.kwhPrice;
 		ui.currency = cfg.ui?.currency === "USD" ? "USD" : "EUR";
+		swap.diskWh = cfg.totalWh ?? 0;
 		if (ctx.mode !== "tui") return;
 		applyChrome(ctx);
 		// nothing is loaded at startup: a new session picks its MECHA unit, a resumed one shows whether its model is in VRAM
@@ -2207,6 +2242,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		persistEnergy(true);
 		prewarm.abort?.abort();
 		clearInterval(metricsTimer);
 		metricsTimer = undefined;
