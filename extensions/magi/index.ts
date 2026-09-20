@@ -32,7 +32,7 @@ import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import { HStack, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { HStack, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 /* ────────────────────────────────────────────────────────────── art ── */
 
@@ -340,10 +340,15 @@ function setPhase(p: Phase): void {
 }
 
 const ANIM_STEP_MS = 220;
+/** How long one Sephirah stays lit in the footer: its name and meaning are text, they need time to be read. */
+const SEPHIRAH_STEP_MS = 1400;
 const FAIL_FLASH_MS = 2500;
 const REBIRTH_MS = 6000;
 const DONE_TITLE_AFTER_MS = 30_000;
 const SIXTH_SEAL_PERCENT = (6 / 7) * 100;
+/** Footer marquee: one cell every FOOTER_SCROLL_MS, with this gap between the loop's end and its start. */
+const FOOTER_SCROLL_MS = 260;
+const FOOTER_SCROLL_GAP = "   ·   ";
 
 /** Sync ratio: share of tool calls that succeeded (null before the first tool). */
 function syncPercent(): number | null {
@@ -1807,6 +1812,7 @@ async function configureMagi(ctx: ExtensionContext): Promise<void> {
 function footerLeft(th: Theme, now = Date.now()): string {
 	const dim = (s: string) => th.fg("dim", s);
 	const step = Math.floor(now / ANIM_STEP_MS);
+	const slowStep = Math.floor(now / SEPHIRAH_STEP_MS);
 	const lights = (fn: (i: number) => NodeLight) => SEPHIROT.map((_, i) => fn(i));
 
 	if (state.compacting) {
@@ -1860,7 +1866,7 @@ function footerLeft(th: Theme, now = Date.now()): string {
 		);
 	}
 	if (state.phase === "thinking") {
-		const cur = Math.floor(step / 2) % 3; // Keter, Chokmah, Binah
+		const cur = slowStep % 3; // Keter, Chokmah, Binah
 		const s = SEPHIROT[cur]!;
 		return (
 			th.fg("accent", "◆ ") +
@@ -1870,7 +1876,7 @@ function footerLeft(th: Theme, now = Date.now()): string {
 		);
 	}
 	if (state.phase === "responding") {
-		const cur = 5 + (step % 5); // Tiferet → Malkuth
+		const cur = 5 + (slowStep % 5); // Tiferet → Malkuth
 		const s = SEPHIROT[cur]!;
 		const tps = liveTps();
 		return (
@@ -1908,9 +1914,21 @@ function footerLeft(th: Theme, now = Date.now()): string {
 
 /** Footer: the animation on the left, other extensions' statuses on the right. */
 function buildFooter(tui: TUI, theme: Theme, footerData: any) {
+	let scrolling = false;
+	let scrollOff = 0;
+	let scrollPeriod = 1;
+	let scrollLine = "";
 	const timer = setInterval(() => {
 		if (animating()) tui.requestRender();
 	}, ANIM_STEP_MS);
+	// The marquee keeps its own cadence: one cell per tick, never derived from the clock, so it
+	// does not stutter when the line is re-rendered at some other pace (animation, streamed tokens)
+	// nor jump when the left side changes length (sephirah name, tok/s) and with it the loop period.
+	const scrollTimer = setInterval(() => {
+		if (!scrolling) return;
+		scrollOff = (scrollOff + 1) % scrollPeriod;
+		tui.requestRender();
+	}, FOOTER_SCROLL_MS);
 
 	const unsub = footerData?.onBranchChange?.(() => tui.requestRender());
 
@@ -1919,14 +1937,30 @@ function buildFooter(tui: TUI, theme: Theme, footerData: any) {
 			const dim = (s: string) => theme.fg("dim", s);
 			const statuses = footerData?.getExtensionStatuses?.();
 			const right = statuses ? [...statuses.values()].filter(Boolean).join(dim(" │ ")) : "";
-			const room = Math.max(12, width - visibleWidth(right) - 2);
-			const l = truncateToWidth(footerLeft(theme), room);
-			const gap = Math.max(1, width - visibleWidth(l) - visibleWidth(right));
-			return [truncateToWidth(l + " ".repeat(gap) + right, width)];
+			const left = footerLeft(theme);
+			const gap = width - visibleWidth(left) - visibleWidth(right);
+			scrolling = gap < 1;
+			if (!scrolling) {
+				scrollLine = "";
+				scrollOff = 0;
+				return [left + " ".repeat(gap) + right];
+			}
+			// Too narrow to fit: scroll the whole line instead of cutting it off. The line is frozen
+			// while it scrolls — live text changes width (seconds, tok/s, sephirah names) and every
+			// change would shift it under the window. A fresh line is taken when it has the same
+			// width, so nothing moves, otherwise at the end of the loop.
+			const line = left + dim(FOOTER_SCROLL_GAP) + right + dim(FOOTER_SCROLL_GAP);
+			const period = Math.max(1, visibleWidth(line));
+			if (!scrollLine || scrollOff === 0 || period === scrollPeriod) {
+				scrollLine = line;
+				scrollPeriod = period;
+			}
+			return [sliceByColumn(scrollLine + scrollLine, scrollOff % scrollPeriod, width, true)];
 		},
 		invalidate() {},
 		dispose() {
 			clearInterval(timer);
+			clearInterval(scrollTimer);
 			unsub?.();
 		},
 	};

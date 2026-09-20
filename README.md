@@ -72,6 +72,8 @@ The window title is `π - Magi - <working directory>`. After a run longer than 3
 
 In fullscreen mode the side panel always reaches the bottom of the terminal.
 
+In a terminal too narrow for it, the footer scrolls as one line instead of being cut off.
+
 ## The seventh seal: smart compaction
 
 The theme does not compact anything itself: it shows who does. For better compaction install [pi-smart-compact](https://www.npmjs.com/package/pi-smart-compact):
