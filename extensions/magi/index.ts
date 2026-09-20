@@ -781,10 +781,11 @@ let lastPersistAt = 0;
 /**
  * Adds this session's new energy to the running total in magi.json, so the COST row survives restarts.
  * ponytail: writes at most once a minute, and adds a delta so parallel sessions do not overwrite each other.
+ * A crash therefore loses up to a minute of energy, which is what a kill loses anyway.
  */
-function persistEnergy(force = false): void {
+function persistEnergy(): void {
 	const delta = swap.energyWh - swap.savedWh;
-	if (delta <= 0 || (!force && Date.now() - lastPersistAt < ENERGY_SAVE_MS)) return;
+	if (delta <= 0 || Date.now() - lastPersistAt < ENERGY_SAVE_MS) return;
 	lastPersistAt = Date.now();
 	const cfg = loadMagiConfig();
 	cfg.totalWh = (cfg.totalWh ?? 0) + delta;
@@ -1350,10 +1351,8 @@ class MagiPanel implements Component {
 	private costRow(inner: number): string {
 		if (!swap.gpus.length) return this.field("COST", "—", inner, "muted");
 		if (ui.kwhPrice === undefined) return this.field("COST", "→ /magi-ui config", inner, "dim");
-		const th = this.theme;
 		const price = (wh: number) => fmtMoney((wh / 1000) * ui.kwhPrice!);
-		const label = th.fg("dim", "COST".padEnd(9));
-		return this.frameLine(" " + label + th.fg("warning", price(totalWh())) + th.fg("dim", ` (ses ${price(swap.energyWh)})`), inner);
+		return this.field("COST", price(totalWh()) + this.theme.fg("dim", ` (ses ${price(swap.energyWh)})`), inner, "warning");
 	}
 
 	private swapRows(inner: number, compact: boolean): string[] {
@@ -1984,7 +1983,7 @@ function buildFooter(tui: TUI, theme: Theme, footerData: any) {
 			// change would shift it under the window. A fresh line is taken when it has the same
 			// width, so nothing moves, otherwise at the end of the loop.
 			const line = left + dim(FOOTER_SCROLL_GAP) + right + dim(FOOTER_SCROLL_GAP);
-			const period = Math.max(1, visibleWidth(line));
+			const period = visibleWidth(line);
 			if (!scrollLine || scrollOff === 0 || period === scrollPeriod) {
 				scrollLine = line;
 				scrollPeriod = period;
@@ -2242,7 +2241,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		persistEnergy(true);
+		persistEnergy();
 		prewarm.abort?.abort();
 		clearInterval(metricsTimer);
 		metricsTimer = undefined;
