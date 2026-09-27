@@ -1,7 +1,7 @@
 // Run: node --test test/
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HYGIENE_DEFAULTS, PRUNED_MARK, pruneContext, type Msg } from "../extensions/magi/local-models.ts";
+import { BUDGET_MESSAGE, HYGIENE_DEFAULTS, MAGI_MD, PRUNED_MARK, pruneContext, thinkingBudget, thinkingWasCut, type Msg } from "../extensions/magi/local-models.ts";
 
 const o = { ...HYGIENE_DEFAULTS, stepTokens: 1000 }; // 3000 chars per step
 
@@ -55,4 +55,18 @@ test("big writes become a marker, small ones stay", () => {
 	assert.match(messages[1]!.content[0].arguments.content, /^<<pruned by MAGI: 3001 lines written/);
 	assert.equal(messages[1]!.content[0].arguments.path, "a.html");
 	assert.equal(messages[2]!.content[0].arguments.content, "hi");
+});
+
+test("thinking budget: high to plan after the user, low between tool calls", () => {
+	assert.equal(thinkingBudget({ messages: [{ role: "user", content: "go" }] }), 16384);
+	assert.equal(thinkingBudget({ messages: [{ role: "user" }, { role: "assistant" }, { role: "tool" }] }), 4096);
+	assert.equal(thinkingBudget({}), 16384);
+});
+
+test("a thinking cut at the budget is detected, and MAGI.md tells the model what it means", () => {
+	const cut = { role: "assistant", content: [{ type: "thinking", thinking: `long plan…\n\n${BUDGET_MESSAGE}\n` }] };
+	const whole = { role: "assistant", content: [{ type: "thinking", thinking: "short plan" }] };
+	assert.ok(thinkingWasCut(cut));
+	assert.ok(!thinkingWasCut(whole));
+	assert.ok(MAGI_MD.includes('starting "Time is up."'));
 });

@@ -33,7 +33,18 @@ import { completeSimple } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { HStack, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { HYGIENE_DEFAULTS, MAGI_MD, PRUNED_MARK, pruneContext, type HygieneOptions, type HygieneStats } from "./local-models.ts";
+import {
+	BUDGET_DEFAULTS,
+	HYGIENE_DEFAULTS,
+	MAGI_MD,
+	PRUNED_MARK,
+	pruneContext,
+	thinkingBudget,
+	thinkingWasCut,
+	type BudgetOptions,
+	type HygieneOptions,
+	type HygieneStats,
+} from "./local-models.ts";
 
 /* ────────────────────────────────────────────────────────────── art ── */
 
@@ -318,6 +329,8 @@ const state = {
 	rebornAt: 0,
 	hasSmartCompact: false,
 	lastCouncil: undefined as { verdict: Vote | null; tally: number; question: string } | undefined,
+	pruned: 0, // tokens the context hygiene keeps away from the model
+	thinkCuts: 0, // replies whose thinking llama.cpp cut at the budget
 };
 
 /** Panel preferences, persisted under "ui" in ~/.pi/agent/magi.json. */
@@ -422,7 +435,9 @@ interface TokenStats {
 
 const tokens: TokenStats = { input: 0, output: 0, cacheRead: 0, cost: 0 };
 
-function addUsage(m: AssistantMessage): void {
+/** Session totals from one assistant reply: tokens, cost, and whether its thinking was cut at the budget. */
+function countAssistant(m: AssistantMessage): void {
+	if (thinkingWasCut(m as any)) state.thinkCuts++;
 	tokens.input += m.usage?.input ?? 0;
 	tokens.output += m.usage?.output ?? 0;
 	tokens.cacheRead += m.usage?.cacheRead ?? 0;
@@ -433,8 +448,9 @@ function addUsage(m: AssistantMessage): void {
 function recountSession(ctx: ExtensionContext): void {
 	Object.assign(tokens, { input: 0, output: 0, cacheRead: 0, cost: 0 });
 	state.lastCouncil = undefined;
+	state.thinkCuts = 0;
 	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type === "message" && entry.message.role === "assistant") addUsage(entry.message as AssistantMessage);
+		if (entry.type === "message" && entry.message.role === "assistant") countAssistant(entry.message as AssistantMessage);
 		if (entry.type === "custom" && entry.customType === "magi-verdict") {
 			const d = entry.data as { verdict?: Vote | null; tally?: number; question?: string } | undefined;
 			if (d && Array.isArray((d as any).opinions)) state.lastCouncil = { verdict: d.verdict ?? null, tally: d.tally ?? 0, question: d.question ?? "" };
@@ -1317,6 +1333,11 @@ class MagiPanel implements Component {
 		if (!compact && usage?.contextWindow) {
 			out.push(this.field("CONTEXT", `${usage.tokens == null ? "?" : fmtTokens(usage.tokens)} / ${fmtTokens(usage.contextWindow)}`, inner, "muted"));
 		}
+		// HYGIENE: tokens pruned from what the model sees, ✂ = thinking cut at the budget
+		if (!compact && (state.pruned || state.thinkCuts)) {
+			const cuts = state.thinkCuts ? ` ✂${state.thinkCuts}` : "";
+			out.push(this.field("HYGIENE", `-${fmtTokens(state.pruned)}${cuts}`, inner, state.thinkCuts ? "warning" : "muted"));
+		}
 		return out;
 	}
 
@@ -1506,6 +1527,7 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 	loads?: Record<string, number>; // real model id → ms its last load took
 	totalWh?: number; // GPU energy summed over every session, for the COST row
 	hygiene?: Partial<HygieneOptions> & { enabled?: boolean }; // context pruning for local models, see local-models.ts
+	thinkingBudget?: Partial<BudgetOptions> & { enabled?: boolean }; // per-request llama.cpp thinking budget
 };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
@@ -2025,6 +2047,7 @@ export default function (pi: ExtensionAPI) {
 	let titleDone = false;
 	let hygiene = { enabled: true, ...HYGIENE_DEFAULTS };
 	let hygieneStats: HygieneStats | undefined;
+	let budget = { enabled: true, ...BUDGET_DEFAULTS };
 	let lastCall = ""; // loop guard: fingerprint of the previous tool call and how often it repeated
 	let repeats = 0;
 
@@ -2187,7 +2210,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		liveCtx = ctx;
-		hygiene = { enabled: true, ...HYGIENE_DEFAULTS, ...loadMagiConfig().hygiene };
+		const magiCfg = loadMagiConfig();
+		hygiene = { enabled: true, ...HYGIENE_DEFAULTS, ...magiCfg.hygiene };
+		budget = { enabled: true, ...BUDGET_DEFAULTS, ...magiCfg.thinkingBudget };
 		// the local-model rules live next to AGENTS.md, created once so the user can edit them
 		const rules = join(ctx.cwd, "MAGI.md");
 		if (!existsSync(rules)) {
@@ -2250,6 +2275,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_provider_request", (event, ctx) => {
 		rememberPrefix(ctx.cwd, event.payload);
+		// llama.cpp honours a per-request thinking budget only when llama-server runs without --reasoning-budget
+		if (!budget.enabled || !swap.base) return;
+		return { ...(event.payload as object), thinking_budget_tokens: thinkingBudget(event.payload, budget) };
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -2292,6 +2320,7 @@ export default function (pi: ExtensionAPI) {
 		if (!hygiene.enabled) return;
 		const pruned = pruneContext(event.messages as any, hygiene);
 		hygieneStats = pruned.stats;
+		state.pruned = pruned.stats.prunedTokens;
 		return { messages: pruned.messages as any };
 	});
 
@@ -2350,7 +2379,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", async (event) => {
 		if (event.message.role !== "assistant") return;
 		const m = event.message as AssistantMessage;
-		addUsage(m);
+		countAssistant(m);
 		if (perf.start) {
 			const end = Date.now();
 			perf.lastMs = end - perf.start;
@@ -2541,11 +2570,12 @@ export default function (pi: ExtensionAPI) {
 				}
 				const s = hygieneStats;
 				ctx.ui.notify(
-					!hygiene.enabled
+					(!hygiene.enabled
 						? "Context hygiene off: /magi-ui hygiene on"
 						: s
 							? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(s.stepTokens)})`
-							: "Context hygiene on: nothing sent to the model yet",
+							: "Context hygiene on: nothing sent to the model yet") +
+						(state.thinkCuts ? ` · thinking cut at the budget ${state.thinkCuts}×` : ""),
 					"info",
 				);
 				return;
