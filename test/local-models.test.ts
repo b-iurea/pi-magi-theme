@@ -8,6 +8,7 @@ import {
 	HYGIENE_DEFAULTS,
 	MAGI_MD,
 	PRUNED_MARK,
+	budgetVerdict,
 	learnedBudget,
 	pruneContext,
 	requestPhase,
@@ -119,5 +120,14 @@ test("a thinking cut at the budget is detected, and MAGI.md tells the model what
 	const whole = { role: "assistant", content: [{ type: "thinking", thinking: "short plan" }] };
 	assert.ok(thinkingWasCut(cut));
 	assert.ok(!thinkingWasCut(whole));
-	assert.ok(MAGI_MD.includes('starting "Time is up."'));
+	assert.ok(MAGI_MD.includes('stopped abruptly') && MAGI_MD.includes('"Time is up."'));
+});
+
+test("budget verdict without the server message: cut near the budget, ignored well past it", () => {
+	const thinking = (tokens: number) => ({ role: "assistant", content: [{ type: "thinking", thinking: "x".repeat(tokens * 3) }] });
+	assert.equal(budgetVerdict(thinking(500), 4096), "within");
+	assert.equal(budgetVerdict(thinking(4000), 4096), "cut");
+	assert.equal(budgetVerdict(thinking(9000), 4096), "ignored");
+	const withMessage = { role: "assistant", content: [{ type: "thinking", thinking: `short… ${BUDGET_MESSAGE}` }] };
+	assert.equal(budgetVerdict(withMessage, 4096), "cut");
 });

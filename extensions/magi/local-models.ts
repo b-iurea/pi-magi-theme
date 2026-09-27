@@ -135,9 +135,9 @@ export function pruneContext(messages: Msg[], o: HygieneOptions = HYGIENE_DEFAUL
 }
 
 /**
- * llama.cpp forces this text, then the end-of-thinking tag, when the thinking budget runs out
- * (llama-server --reasoning-budget-message); the model reads it as its own words, so it says what to do next.
- * It must match the server flag exactly: it is also how a cut is detected.
+ * Optional llama-server --reasoning-budget-message: when the thinking budget runs out llama.cpp forces this text,
+ * then the end-of-thinking tag, and the model reads it as its own words, so it says what to do next.
+ * Without it llama.cpp closes the thinking silently; cuts are then detected by length (budgetVerdict).
  */
 export const BUDGET_MESSAGE = "Time is up. I will take the smallest safe next step with what I know, and write my open plan into PLAN.md.";
 
@@ -172,6 +172,17 @@ export function learnedBudget(samples: number[], phase: BudgetPhase): number | u
 	return Math.min(hi, Math.max(lo, Math.ceil((p * BUDGET_HEADROOM) / 1024) * 1024));
 }
 
+/**
+ * What the server did with the budget sent for this reply, from the thinking length (estimated, ±10%):
+ * cut near the budget, "ignored" well past it (llama-server started with its own --reasoning-budget, or too old
+ * to read thinking_budget_tokens), otherwise within.
+ */
+export function budgetVerdict(m: Msg, budget: number): "cut" | "ignored" | "within" {
+	if (thinkingWasCut(m)) return "cut";
+	const thought = thinkingTokens(m);
+	return thought > budget * 1.3 ? "ignored" : thought >= budget * 0.9 ? "cut" : "within";
+}
+
 /** Estimated thinking tokens of a reply (same chars/token as the hygiene). */
 export function thinkingTokens(m: Msg): number {
 	const chars = (m.content ?? []).reduce((n: number, c: any) => n + (c.type === "thinking" ? (c.thinking?.length ?? 0) : 0), 0);
@@ -196,7 +207,7 @@ These rules are appended to the system prompt by the MAGI extension. Edit them f
 - Keep reasoning short: understand the step, decide, act. Do not re-plan what is already decided.
 - Never draft code or file contents in your reasoning. Write them directly with the write/edit tool.
 - If two attempts at the same approach fail, stop and change approach, or ask the user. Do not retry blindly.
-- If your reasoning ends with a sentence starting "${BUDGET_MESSAGE.split(". ")[0]}.", your thinking budget ran out: in that turn make no large or irreversible change. Write your open plan into PLAN.md or take one small step you can verify; the next turn gives you a fresh budget.
+- If your reasoning stopped abruptly mid-thought, or ends with "${BUDGET_MESSAGE.split(". ")[0]}.", your thinking budget ran out: in that turn make no large or irreversible change. Write your open plan into PLAN.md or take one small step you can verify; the next turn gives you a fresh budget.
 
 ## Your context is small: spend it carefully
 - Search before reading: use rg/find to locate code, then read only the needed range (offset/limit).

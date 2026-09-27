@@ -43,6 +43,7 @@ import {
 	pruneContext,
 	requestPhase,
 	thinkingTokens,
+	budgetVerdict,
 	thinkingWasCut,
 	type BudgetMode,
 	type BudgetPhase,
@@ -2060,6 +2061,7 @@ export default function (pi: ExtensionAPI) {
 	let fixedBudget = { ...BUDGET_DEFAULTS };
 	let learned: Record<string, Partial<Record<BudgetPhase, number[]>>> = {};
 	let pendingBudget: { model: string; phase: BudgetPhase; tokens: number } | undefined; // the request in flight
+	const budgetIgnored = new Set<string>(); // models whose llama-server thought past the budget: it sets its own
 	const budgetFor = (model: string, phase: BudgetPhase) =>
 		budgetMode === "fixed" ? fixedBudget[phase] : (learnedBudget(learned[model]?.[phase] ?? [], phase) ?? BUDGET_DEFAULTS[phase]);
 	const persistBudget = () => {
@@ -2406,8 +2408,11 @@ export default function (pi: ExtensionAPI) {
 		// learn how long this model thinks in this phase; a cut counts as the budget it hit
 		const thought = thinkingTokens(m as any);
 		if (pendingBudget && thought > 0 && m.stopReason !== "aborted" && m.stopReason !== "error") {
+			const verdict = budgetVerdict(m as any, pendingBudget.tokens);
+			if (verdict === "ignored") budgetIgnored.add(pendingBudget.model);
+			if (verdict === "cut" && !thinkingWasCut(m as any)) state.thinkCuts++; // silent cut: no budget message on the server
 			const samples = ((learned[pendingBudget.model] ??= {})[pendingBudget.phase] ??= []);
-			samples.push(thinkingWasCut(m as any) ? Math.max(thought, pendingBudget.tokens) : thought);
+			samples.push(verdict === "cut" ? Math.max(thought, pendingBudget.tokens) : thought);
 			samples.splice(0, samples.length - BUDGET_WINDOW);
 			persistBudget();
 		}
@@ -2643,7 +2648,8 @@ export default function (pi: ExtensionAPI) {
 					budgetMode === "off"
 						? "Thinking budget off: llama-server decides. /magi-ui budget auto"
 						: `Thinking budget ${budgetMode.toUpperCase()} · ${model || "no model"}: ${phase("planning")} · ${phase("acting")}` +
-								(swap.base ? "" : " · applies to llama-swap models only"),
+								(swap.base ? "" : " · applies to llama-swap models only") +
+								(budgetIgnored.has(model) ? " · ⚠ llama-server thinks past it: it was started with its own --reasoning-budget (or is too old), which wins" : ""),
 					"info",
 				);
 				return;
