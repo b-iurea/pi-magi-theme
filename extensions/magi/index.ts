@@ -35,13 +35,17 @@ import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { HStack, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
 	BUDGET_DEFAULTS,
+	BUDGET_WINDOW,
 	HYGIENE_DEFAULTS,
 	MAGI_MD,
 	PRUNED_MARK,
+	learnedBudget,
 	pruneContext,
-	thinkingBudget,
+	requestPhase,
+	thinkingTokens,
 	thinkingWasCut,
-	type BudgetOptions,
+	type BudgetMode,
+	type BudgetPhase,
 	type HygieneOptions,
 	type HygieneStats,
 } from "./local-models.ts";
@@ -1527,7 +1531,12 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 	loads?: Record<string, number>; // real model id → ms its last load took
 	totalWh?: number; // GPU energy summed over every session, for the COST row
 	hygiene?: Partial<HygieneOptions> & { enabled?: boolean }; // context pruning for local models, see local-models.ts
-	thinkingBudget?: Partial<BudgetOptions> & { enabled?: boolean }; // per-request llama.cpp thinking budget
+	thinkingBudget?: {
+		mode?: BudgetMode; // auto (learned per model) · fixed · off, set with /magi-ui budget
+		planning?: number; // fixed budgets
+		acting?: number;
+		learned?: Record<string, Partial<Record<BudgetPhase, number[]>>>; // written by the theme: recent thinking lengths per model
+	};
 };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
@@ -2047,7 +2056,16 @@ export default function (pi: ExtensionAPI) {
 	let titleDone = false;
 	let hygiene = { enabled: true, ...HYGIENE_DEFAULTS };
 	let hygieneStats: HygieneStats | undefined;
-	let budget = { enabled: true, ...BUDGET_DEFAULTS };
+	let budgetMode: BudgetMode = "auto";
+	let fixedBudget = { ...BUDGET_DEFAULTS };
+	let learned: Record<string, Partial<Record<BudgetPhase, number[]>>> = {};
+	let pendingBudget: { model: string; phase: BudgetPhase; tokens: number } | undefined; // the request in flight
+	const budgetFor = (model: string, phase: BudgetPhase) =>
+		budgetMode === "fixed" ? fixedBudget[phase] : (learnedBudget(learned[model]?.[phase] ?? [], phase) ?? BUDGET_DEFAULTS[phase]);
+	const persistBudget = () => {
+		const cfg = loadMagiConfig();
+		saveMagiConfig({ ...cfg, thinkingBudget: { mode: budgetMode, ...fixedBudget, learned } });
+	};
 	let lastCall = ""; // loop guard: fingerprint of the previous tool call and how often it repeated
 	let repeats = 0;
 
@@ -2212,7 +2230,10 @@ export default function (pi: ExtensionAPI) {
 		liveCtx = ctx;
 		const magiCfg = loadMagiConfig();
 		hygiene = { enabled: true, ...HYGIENE_DEFAULTS, ...magiCfg.hygiene };
-		budget = { enabled: true, ...BUDGET_DEFAULTS, ...magiCfg.thinkingBudget };
+		const tb = magiCfg.thinkingBudget ?? {};
+		budgetMode = tb.mode ?? "auto";
+		fixedBudget = { planning: tb.planning ?? BUDGET_DEFAULTS.planning, acting: tb.acting ?? BUDGET_DEFAULTS.acting };
+		learned = tb.learned ?? {};
 		// the local-model rules live next to AGENTS.md, created once so the user can edit them
 		const rules = join(ctx.cwd, "MAGI.md");
 		if (!existsSync(rules)) {
@@ -2276,8 +2297,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", (event, ctx) => {
 		rememberPrefix(ctx.cwd, event.payload);
 		// llama.cpp honours a per-request thinking budget only when llama-server runs without --reasoning-budget
-		if (!budget.enabled || !swap.base) return;
-		return { ...(event.payload as object), thinking_budget_tokens: thinkingBudget(event.payload, budget) };
+		if (budgetMode === "off" || !swap.base || !ctx.model) return;
+		const phase = requestPhase(event.payload);
+		pendingBudget = { model: ctx.model.id, phase, tokens: budgetFor(ctx.model.id, phase) };
+		return { ...(event.payload as object), thinking_budget_tokens: pendingBudget.tokens };
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -2380,6 +2403,15 @@ export default function (pi: ExtensionAPI) {
 		if (event.message.role !== "assistant") return;
 		const m = event.message as AssistantMessage;
 		countAssistant(m);
+		// learn how long this model thinks in this phase; a cut counts as the budget it hit
+		const thought = thinkingTokens(m as any);
+		if (pendingBudget && thought > 0 && m.stopReason !== "aborted" && m.stopReason !== "error") {
+			const samples = ((learned[pendingBudget.model] ??= {})[pendingBudget.phase] ??= []);
+			samples.push(thinkingWasCut(m as any) ? Math.max(thought, pendingBudget.tokens) : thought);
+			samples.splice(0, samples.length - BUDGET_WINDOW);
+			persistBudget();
+		}
+		pendingBudget = undefined;
 		if (perf.start) {
 			const end = Date.now();
 			perf.lastMs = end - perf.start;
@@ -2556,17 +2588,23 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off])",
+		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|<thinking turns> <tool results>]|budget [auto|off|reset|<planning> <acting>])",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
 
 			if (arg === "hygiene" || arg.startsWith("hygiene ")) {
 				const sub = arg.slice("hygiene".length).trim();
-				if (sub === "on" || sub === "off") {
-					hygiene.enabled = sub === "on";
+				const keep = /^(\d+)\s+(\d+)$/.exec(sub);
+				if (sub === "on" || sub === "off" || keep) {
+					if (keep) Object.assign(hygiene, { enabled: true, keepThinkingTurns: Number(keep[1]), keepToolResults: Number(keep[2]) });
+					else hygiene.enabled = sub === "on";
 					const cfg = loadMagiConfig();
-					saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled: hygiene.enabled } });
+					const { enabled, keepThinkingTurns, keepToolResults } = hygiene;
+					saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled, keepThinkingTurns, keepToolResults } });
+				} else if (sub) {
+					ctx.ui.notify("Usage: /magi-ui hygiene [on|off|<thinking turns kept> <tool results kept>], e.g. 3 5", "warning");
+					return;
 				}
 				const s = hygieneStats;
 				ctx.ui.notify(
@@ -2575,7 +2613,37 @@ export default function (pi: ExtensionAPI) {
 						: s
 							? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(s.stepTokens)})`
 							: "Context hygiene on: nothing sent to the model yet") +
+						` · keeps thinking of the last ${hygiene.keepThinkingTurns} turns, the last ${hygiene.keepToolResults} tool results` +
 						(state.thinkCuts ? ` · thinking cut at the budget ${state.thinkCuts}×` : ""),
+					"info",
+				);
+				return;
+			}
+			if (arg === "budget" || arg.startsWith("budget ")) {
+				const sub = arg.slice("budget".length).trim();
+				const model = ctx.model?.id ?? "";
+				const tokens = (t: string) => Math.round(Number(t.replace(/k$/, "")) * (t.endsWith("k") ? 1024 : 1));
+				const fixed = /^(\d+k?)\s+(\d+k?)$/.exec(sub);
+				if (sub === "auto" || sub === "off") budgetMode = sub;
+				else if (sub === "reset") delete learned[model];
+				else if (fixed) {
+					budgetMode = "fixed";
+					fixedBudget = { planning: tokens(fixed[1]!), acting: tokens(fixed[2]!) };
+				} else if (sub) {
+					ctx.ui.notify("Usage: /magi-ui budget [auto|off|reset|<planning> <acting>], e.g. 16k 4k", "warning");
+					return;
+				}
+				if (sub) persistBudget();
+				const phase = (p: BudgetPhase) => {
+					const n = learned[model]?.[p]?.length ?? 0;
+					const how = budgetMode === "fixed" ? "fixed" : learnedBudget(learned[model]?.[p] ?? [], p) ? `learned from ${n}` : `default, learning ${n}/10`;
+					return `${p} ${budgetFor(model, p) / 1024}k (${how})`;
+				};
+				ctx.ui.notify(
+					budgetMode === "off"
+						? "Thinking budget off: llama-server decides. /magi-ui budget auto"
+						: `Thinking budget ${budgetMode.toUpperCase()} · ${model || "no model"}: ${phase("planning")} · ${phase("acting")}` +
+								(swap.base ? "" : " · applies to llama-swap models only"),
 					"info",
 				);
 				return;

@@ -141,16 +141,41 @@ export function pruneContext(messages: Msg[], o: HygieneOptions = HYGIENE_DEFAUL
  */
 export const BUDGET_MESSAGE = "Time is up. I will take the smallest safe next step with what I know, and write my open plan into PLAN.md.";
 
-export interface BudgetOptions {
-	planning: number; // thinking tokens right after the user spoke
-	acting: number; // thinking tokens between tool calls, where long thinking is mostly overthinking
+export type BudgetPhase = "planning" | "acting"; // right after the user spoke / between tool calls
+export type BudgetMode = "auto" | "fixed" | "off";
+
+/** Starting budgets, used until a model has enough samples to learn its own. */
+export const BUDGET_DEFAULTS: Record<BudgetPhase, number> = { planning: 16384, acting: 4096 };
+export const BUDGET_LIMITS: Record<BudgetPhase, [number, number]> = { planning: [4096, 32768], acting: [2048, 32768] };
+
+const BUDGET_SAMPLES_MIN = 10;
+export const BUDGET_WINDOW = 30; // thinking lengths kept per model and phase
+const BUDGET_PERCENTILE = 0.95;
+const BUDGET_HEADROOM = 1.5;
+
+/** Phase of the next request, from the OpenAI-style payload: a tool result last means the agent is mid-task. */
+export function requestPhase(payload: any): BudgetPhase {
+	return payload?.messages?.at(-1)?.role === "tool" ? "acting" : "planning";
 }
 
-export const BUDGET_DEFAULTS: BudgetOptions = { planning: 16384, acting: 4096 };
+/**
+ * Learned budget: 1.5 × the 95th percentile of recent thinking lengths, clamped and rounded to 1k.
+ * A cut thinking is recorded as the budget it hit, so while at most 5% of replies are cut (the runaway ones)
+ * the budget holds; above that the percentile reaches the budget and it grows 1.5× until cuts fall back under 5%.
+ * A model that thinks little pulls its budget down. Undefined until there are enough samples.
+ */
+export function learnedBudget(samples: number[], phase: BudgetPhase): number | undefined {
+	if (samples.length < BUDGET_SAMPLES_MIN) return undefined;
+	const sorted = [...samples].sort((a, b) => a - b);
+	const p = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * BUDGET_PERCENTILE))]!;
+	const [lo, hi] = BUDGET_LIMITS[phase];
+	return Math.min(hi, Math.max(lo, Math.ceil((p * BUDGET_HEADROOM) / 1024) * 1024));
+}
 
-/** Budget for the next request, from the OpenAI-style payload: a tool result last means the agent is mid-task. */
-export function thinkingBudget(payload: any, o: BudgetOptions = BUDGET_DEFAULTS): number {
-	return payload?.messages?.at(-1)?.role === "tool" ? o.acting : o.planning;
+/** Estimated thinking tokens of a reply (same chars/token as the hygiene). */
+export function thinkingTokens(m: Msg): number {
+	const chars = (m.content ?? []).reduce((n: number, c: any) => n + (c.type === "thinking" ? (c.thinking?.length ?? 0) : 0), 0);
+	return Math.round(chars / CHARS_PER_TOKEN);
 }
 
 /** Whether llama.cpp cut this message's thinking at the budget. */

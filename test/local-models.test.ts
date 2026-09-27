@@ -1,7 +1,19 @@
 // Run: node --test test/
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BUDGET_MESSAGE, HYGIENE_DEFAULTS, MAGI_MD, PRUNED_MARK, pruneContext, thinkingBudget, thinkingWasCut, type Msg } from "../extensions/magi/local-models.ts";
+import {
+	BUDGET_DEFAULTS,
+	BUDGET_MESSAGE,
+	BUDGET_WINDOW,
+	HYGIENE_DEFAULTS,
+	MAGI_MD,
+	PRUNED_MARK,
+	learnedBudget,
+	pruneContext,
+	requestPhase,
+	thinkingWasCut,
+	type Msg,
+} from "../extensions/magi/local-models.ts";
 
 const o = { ...HYGIENE_DEFAULTS, stepTokens: 1000 }; // 3000 chars per step
 
@@ -57,10 +69,49 @@ test("big writes become a marker, small ones stay", () => {
 	assert.equal(messages[2]!.content[0].arguments.content, "hi");
 });
 
-test("thinking budget: high to plan after the user, low between tool calls", () => {
-	assert.equal(thinkingBudget({ messages: [{ role: "user", content: "go" }] }), 16384);
-	assert.equal(thinkingBudget({ messages: [{ role: "user" }, { role: "assistant" }, { role: "tool" }] }), 4096);
-	assert.equal(thinkingBudget({}), 16384);
+test("phase: planning after the user, acting between tool calls", () => {
+	assert.equal(requestPhase({ messages: [{ role: "user", content: "go" }] }), "planning");
+	assert.equal(requestPhase({ messages: [{ role: "user" }, { role: "assistant" }, { role: "tool" }] }), "acting");
+	assert.equal(requestPhase({}), "planning");
+});
+
+/** Runs the budget loop the way the extension does: think, maybe get cut, record, next budget. */
+function simulate(think: (i: number) => number, turns = 300) {
+	const samples: number[] = [];
+	let cuts = 0;
+	let lastCuts = 0;
+	let budget = BUDGET_DEFAULTS.acting;
+	for (let i = 0; i < turns; i++) {
+		budget = learnedBudget(samples, "acting") ?? BUDGET_DEFAULTS.acting;
+		const want = think(i);
+		const cut = want > budget;
+		if (cut) cuts++;
+		if (cut && i >= turns - 100) lastCuts++;
+		samples.push(cut ? budget : want);
+		samples.splice(0, samples.length - BUDGET_WINDOW);
+	}
+	return { budget, cuts, lastCuts };
+}
+
+test("learned budget: holds on runaway outliers, cuts only them", () => {
+	// mostly 300–1500 tokens, a 12k runaway think every 40 turns (2.5%)
+	const { budget, lastCuts } = simulate((i) => (i % 40 === 39 ? 12_000 : 300 + ((i * 97) % 1200)));
+	assert.ok(budget <= 4096, `budget ${budget}`); // not dragged up by the runaways
+	assert.ok(lastCuts <= 3, `${lastCuts} cuts in the last 100 turns`); // the runaways, nothing else
+});
+
+test("learned budget: grows for a model that needs to think longer", () => {
+	// a model that routinely thinks 5–9k in this phase: the 4k default cuts it every time at first
+	const { budget, lastCuts } = simulate((i) => 5000 + ((i * 131) % 4000));
+	assert.ok(budget >= 9000, `budget ${budget}`);
+	assert.ok(lastCuts <= 5, `${lastCuts} cuts in the last 100 turns`);
+});
+
+test("learned budget: shrinks for a model that thinks little, within the limits", () => {
+	assert.equal(learnedBudget(Array(30).fill(200), "acting"), 2048); // floor
+	assert.equal(learnedBudget(Array(30).fill(200), "planning"), 4096);
+	assert.equal(learnedBudget(Array(30).fill(90_000), "planning"), 32768); // ceiling
+	assert.equal(learnedBudget(Array(9).fill(200), "acting"), undefined); // too few samples: defaults
 });
 
 test("a thinking cut at the budget is detected, and MAGI.md tells the model what it means", () => {
