@@ -24,7 +24,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -33,6 +33,7 @@ import { completeSimple } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { HStack, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { HYGIENE_DEFAULTS, MAGI_MD, PRUNED_MARK, pruneContext, type HygieneOptions, type HygieneStats } from "./local-models.ts";
 
 /* ────────────────────────────────────────────────────────────── art ── */
 
@@ -1504,9 +1505,11 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 	ui?: { compact?: boolean; kwhPrice?: number; currency?: Currency };
 	loads?: Record<string, number>; // real model id → ms its last load took
 	totalWh?: number; // GPU energy summed over every session, for the COST row
+	hygiene?: Partial<HygieneOptions> & { enabled?: boolean }; // context pruning for local models, see local-models.ts
 };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
+const LOOP_REPEATS = 3; // the same tool call this many times in a row is blocked
 
 function loadMagiConfig(): MagiConfig {
 	try {
@@ -2020,6 +2023,10 @@ export default function (pi: ExtensionAPI) {
 	let panelHandle: OverlayHandle | undefined;
 	let panel: MagiPanel | undefined;
 	let titleDone = false;
+	let hygiene = { enabled: true, ...HYGIENE_DEFAULTS };
+	let hygieneStats: HygieneStats | undefined;
+	let lastCall = ""; // loop guard: fingerprint of the previous tool call and how often it repeated
+	let repeats = 0;
 
 	const repaint = () => {
 		panel?.invalidate();
@@ -2180,6 +2187,17 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		liveCtx = ctx;
+		hygiene = { enabled: true, ...HYGIENE_DEFAULTS, ...loadMagiConfig().hygiene };
+		// the local-model rules live next to AGENTS.md, created once so the user can edit them
+		const rules = join(ctx.cwd, "MAGI.md");
+		if (!existsSync(rules)) {
+			try {
+				writeFileSync(rules, MAGI_MD);
+				if (ctx.mode === "tui") ctx.ui.notify("MAGI.md created: rules for local models, appended to the system prompt", "info");
+			} catch {
+				// read-only directory: the built-in rules are used as they are
+			}
+		}
 		void refreshUnit(ctx);
 		recountSession(ctx);
 		state.hasSmartCompact = pi.getCommands().some((c) => c.name.replace(/^\//, "") === "smart-compact");
@@ -2256,6 +2274,39 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", async () => {
 		state.runStart = Date.now();
+		lastCall = "";
+	});
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		let rules = MAGI_MD;
+		try {
+			rules = readFileSync(join(ctx.cwd, "MAGI.md"), "utf8");
+		} catch {
+			// no MAGI.md (deleted, or unwritable cwd): the built-in rules
+		}
+		return rules.trim() ? { systemPrompt: `${event.systemPrompt}\n\n${rules.trim()}` } : undefined;
+	});
+
+	// before every request: drop old thinking and tool outputs from what the model sees, never from the session
+	pi.on("context", async (event) => {
+		if (!hygiene.enabled) return;
+		const pruned = pruneContext(event.messages as any, hygiene);
+		hygieneStats = pruned.stats;
+		return { messages: pruned.messages as any };
+	});
+
+	// local models loop on the same call, and may copy a pruned placeholder into a file
+	pi.on("tool_call", async (event) => {
+		const args = JSON.stringify(event.input);
+		if ((event.toolName === "write" || event.toolName === "edit") && args.includes(PRUNED_MARK)) {
+			return { block: true, reason: `MAGI: this ${event.toolName} contains a "${PRUNED_MARK}" placeholder, not real content. Read the file and use the actual text.` };
+		}
+		const fingerprint = event.toolName + args;
+		repeats = fingerprint === lastCall ? repeats + 1 : 1;
+		lastCall = fingerprint;
+		if (repeats >= LOOP_REPEATS) {
+			return { block: true, reason: `MAGI: identical ${event.toolName} call ${repeats} times in a row. Repeating it will not change the outcome: change approach, or tell the user what blocks you.` };
+		}
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -2476,11 +2527,29 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config)",
+		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off])",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
 
+			if (arg === "hygiene" || arg.startsWith("hygiene ")) {
+				const sub = arg.slice("hygiene".length).trim();
+				if (sub === "on" || sub === "off") {
+					hygiene.enabled = sub === "on";
+					const cfg = loadMagiConfig();
+					saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled: hygiene.enabled } });
+				}
+				const s = hygieneStats;
+				ctx.ui.notify(
+					!hygiene.enabled
+						? "Context hygiene off: /magi-ui hygiene on"
+						: s
+							? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(s.stepTokens)})`
+							: "Context hygiene on: nothing sent to the model yet",
+					"info",
+				);
+				return;
+			}
 			if (arg === "panel") {
 				panelEnabled = !panelEnabled;
 				if (panelEnabled) showPanel(ctx.ui.theme);

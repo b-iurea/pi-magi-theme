@@ -44,6 +44,7 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi-ui status` | llama-swap report from its last 100 requests: speed, tokens, cache hits, MTP draft acceptance, durations, errors per model |
 | `/magi-ui config` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
 | `/magi-ui panel` · `on` · `off` | hide/show the side panel, enable/disable the whole chrome |
+| `/magi-ui hygiene` · `on` · `off` | show how much context the hygiene pruned; enable/disable it (remembered) |
 
 ## Lore ↔ function
 
@@ -84,6 +85,16 @@ pi install npm:pi-smart-compact
 
 It extracts files, errors, decisions and open loops locally (no LLM calls), then synthesizes and verifies the summary. Point its `summaryModel` at a local model to keep compaction free. When it is installed, the sixth seal suggests `/smart-compact`, the seals name it while they break (`✶ BREAKING THE SEALS · smart-compact · 4s`) and the seventh seal reports who actually produced the summary: `smart-compact`, or `pi native` if it fell back to pi's own compactor.
 
+## Local models: context hygiene, loop guard, MAGI.md
+
+Local models run out of context on long tasks well before they run out of work. MAGI keeps them going:
+
+- **Context hygiene.** Before every request, old thinking blocks, old tool outputs and old `write`/`edit` payloads are replaced by a one-line `<<pruned by MAGI…>>` marker in what the model sees; the saved session stays whole. The newest 3 turns keep their thinking and the newest 5 tool results stay whole. Pruning advances in steps of ~15k tokens behind a watermark, so between steps the prompt only grows at the end and llama.cpp keeps reusing its KV cache. Replayed on two real 104k/119k-token sessions it keeps them at ~64k/~47k. Old tool outputs are masked instead of summarized: [simple observation masking matches LLM summarization at half the cost](https://arxiv.org/abs/2508.21433).
+- **Loop guard.** The same tool call with the same arguments three times in a row is blocked with a message asking the model to change approach; a `write`/`edit` that copies a pruned marker into a file is blocked too.
+- **MAGI.md.** Created in the project on the first start (never overwritten) and appended to the system prompt on every run: short rules against the usual local-model failures (overthinking, reading whole files, invented paths, unverified success, blind retries), and a PLAN.md/NOTES.md habit so the task state survives pruning and compaction. Edit it per project; delete it to get the defaults back.
+
+Pair it with llama.cpp's reasoning cap, which stops a runaway think inside a single turn: `--reasoning-budget 8192 --reasoning-budget-message "OK, I have thought enough. Now I act."`.
+
 ## The council
 
 `/magi <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
@@ -107,7 +118,8 @@ Each nature is a lens, not a specialty, so the council answers any question, not
   "MELCHIOR": { "model": "llama-swap/Qwen3.8 27B Q4_K_M - Thinking", "thinking": "low" },
   "ui": { "compact": false, "kwhPrice": 0.30, "currency": "EUR" },
   "loads": { "qwen3.8-27b": 41200 },
-  "totalWh": 1843.2
+  "totalWh": 1843.2,
+  "hygiene": { "enabled": true, "keepThinkingTurns": 3, "keepToolResults": 5, "stepTokens": 15000, "minPruneChars": 600 }
 }
 ```
 
@@ -115,6 +127,7 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `ui.compact`: start with the compact side panel;
 - `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy by this price, showing the running total of every session with the current one in brackets;
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
+- `hygiene`: context pruning for local models (all keys optional, these are the defaults); `/magi-ui hygiene off` disables it;
 - `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
 
 ## Release
