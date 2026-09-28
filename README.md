@@ -47,6 +47,8 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi-ui hygiene` · `on` · `off` · `step <tokens>` · `<turns> <results>` | show how much context the hygiene pruned; enable/disable it; how many prunable tokens make a pruning step (e.g. `step 40k`, default 15k); how many recent turns keep their thinking and how many tool results stay whole (e.g. `3 5`) |
 | `/magi-ui budget` · `auto` · `off` · `reset` · `message` · `<planning> <acting>` | show the thinking budget of the current model; learn it per model (default); leave it to llama-server; forget what was learned for this model; turn the closing message off/on; or fix it (e.g. `16k 4k`) |
 
+Type `/magi ` or `/magi-ui ` (with the space) to see every option with a short description; keep typing to narrow it down, Tab or Enter to pick one.
+
 ## Lore ↔ function
 
 Every symbol stands for something real the agent is doing.

@@ -1544,6 +1544,36 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
+/** Command arguments offered by autocomplete: the full argument, and what it does. */
+const MAGI_ARGS: [string, string][] = [
+	["review", "the council reviews your pending changes before you commit"],
+	["config", "pick a model for each MAGI"],
+	["mecha", "MECHA SELECT: pick the llama-swap model to activate"],
+];
+const MAGI_UI_ARGS: [string, string][] = [
+	["status", "llama-swap report: speed, tokens, cache hits, errors per model"],
+	["panel", "hide/show the side panel"],
+	["compact", "toggle the compact side panel"],
+	["config", "electricity price and currency for the COST row"],
+	["on", "enable the MAGI chrome"],
+	["off", "disable the MAGI chrome"],
+	["hygiene", "show how much context was pruned"],
+	["hygiene on", "enable context pruning"],
+	["hygiene off", "disable context pruning"],
+	["hygiene step 40k", "prune less often: fewer prompt re-reads on long tasks (default 15k)"],
+	["hygiene 3 5", "recent turns that keep their thinking, tool results kept whole"],
+	["budget", "show the thinking budget of the current model"],
+	["budget auto", "learn the budget per model (default)"],
+	["budget off", "no budget: llama-server decides"],
+	["budget reset", "forget what was learned for the current model"],
+	["budget message", "turn the closing message after a cut off/on"],
+	["budget 16k 4k", "fixed budget: planning, acting"],
+];
+function argCompletions(table: [string, string][], prefix: string) {
+	const p = prefix.trimStart().toLowerCase();
+	const items = table.filter(([value]) => value.startsWith(p)).map(([value, description]) => ({ value, label: value, description }));
+	return items.length ? items : null;
+}
 const LOOP_REPEATS = 3; // the same tool call this many times in a row is blocked
 
 function loadMagiConfig(): MagiConfig {
@@ -2559,6 +2589,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("magi", {
 		description: "Ask the three MAGI (pragmatist, guardian, visionary); /magi review [focus] judges the git diff; /magi config assigns models; /magi mecha picks the model",
+		getArgumentCompletions: (prefix) => argCompletions(MAGI_ARGS, prefix),
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (arg === "config") return configureMagi(ctx);
@@ -2600,6 +2631,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("magi-ui", {
 		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|step <tokens>|<thinking turns> <tool results>]|budget [auto|off|reset|message|<planning> <acting>])",
+		getArgumentCompletions: (prefix) => argCompletions(MAGI_UI_ARGS, prefix),
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
