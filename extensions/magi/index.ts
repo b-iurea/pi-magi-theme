@@ -35,11 +35,13 @@ import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { HStack, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
 	BUDGET_DEFAULTS,
+	BUDGET_MESSAGE,
 	BUDGET_WINDOW,
 	HYGIENE_DEFAULTS,
 	MAGI_MD,
 	PRUNED_MARK,
 	learnedBudget,
+	budgetSample,
 	pruneContext,
 	requestPhase,
 	thinkingTokens,
@@ -1536,6 +1538,7 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 		mode?: BudgetMode; // auto (learned per model) · fixed · off, set with /magi-ui budget
 		planning?: number; // fixed budgets
 		acting?: number;
+		message?: boolean; // send BUDGET_MESSAGE as reasoning_budget_message (default on), /magi-ui budget message
 		learned?: Record<string, Partial<Record<BudgetPhase, number[]>>>; // written by the theme: recent thinking lengths per model
 	};
 };
@@ -2059,6 +2062,7 @@ export default function (pi: ExtensionAPI) {
 	let hygieneStats: HygieneStats | undefined;
 	let budgetMode: BudgetMode = "auto";
 	let fixedBudget = { ...BUDGET_DEFAULTS };
+	let budgetMessage = true;
 	let learned: Record<string, Partial<Record<BudgetPhase, number[]>>> = {};
 	let pendingBudget: { model: string; phase: BudgetPhase; tokens: number } | undefined; // the request in flight
 	const budgetIgnored = new Set<string>(); // models whose llama-server thought past the budget: it sets its own
@@ -2066,7 +2070,7 @@ export default function (pi: ExtensionAPI) {
 		budgetMode === "fixed" ? fixedBudget[phase] : (learnedBudget(learned[model]?.[phase] ?? [], phase) ?? BUDGET_DEFAULTS[phase]);
 	const persistBudget = () => {
 		const cfg = loadMagiConfig();
-		saveMagiConfig({ ...cfg, thinkingBudget: { mode: budgetMode, ...fixedBudget, learned } });
+		saveMagiConfig({ ...cfg, thinkingBudget: { mode: budgetMode, ...fixedBudget, message: budgetMessage, learned } });
 	};
 	let lastCall = ""; // loop guard: fingerprint of the previous tool call and how often it repeated
 	let repeats = 0;
@@ -2235,6 +2239,7 @@ export default function (pi: ExtensionAPI) {
 		const tb = magiCfg.thinkingBudget ?? {};
 		budgetMode = tb.mode ?? "auto";
 		fixedBudget = { planning: tb.planning ?? BUDGET_DEFAULTS.planning, acting: tb.acting ?? BUDGET_DEFAULTS.acting };
+		budgetMessage = tb.message ?? true;
 		learned = tb.learned ?? {};
 		// the local-model rules live next to AGENTS.md, created once so the user can edit them
 		const rules = join(ctx.cwd, "MAGI.md");
@@ -2302,7 +2307,8 @@ export default function (pi: ExtensionAPI) {
 		if (budgetMode === "off" || !swap.base || !ctx.model) return;
 		const phase = requestPhase(event.payload);
 		pendingBudget = { model: ctx.model.id, phase, tokens: budgetFor(ctx.model.id, phase) };
-		return { ...(event.payload as object), thinking_budget_tokens: pendingBudget.tokens };
+		const payload = { ...(event.payload as object), thinking_budget_tokens: pendingBudget.tokens };
+		return budgetMessage ? { ...payload, reasoning_budget_message: `\n\n${BUDGET_MESSAGE}` } : payload;
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -2405,14 +2411,14 @@ export default function (pi: ExtensionAPI) {
 		if (event.message.role !== "assistant") return;
 		const m = event.message as AssistantMessage;
 		countAssistant(m);
-		// learn how long this model thinks in this phase; a cut counts as the budget it hit
+		// learn how long this model thinks in this phase; a cut must not raise the budget
 		const thought = thinkingTokens(m as any);
 		if (pendingBudget && thought > 0 && m.stopReason !== "aborted" && m.stopReason !== "error") {
 			const verdict = budgetVerdict(m as any, pendingBudget.tokens);
 			if (verdict === "ignored") budgetIgnored.add(pendingBudget.model);
 			if (verdict === "cut" && !thinkingWasCut(m as any)) state.thinkCuts++; // silent cut: no budget message on the server
 			const samples = ((learned[pendingBudget.model] ??= {})[pendingBudget.phase] ??= []);
-			samples.push(verdict === "cut" ? Math.max(thought, pendingBudget.tokens) : thought);
+			samples.push(budgetSample(thought, pendingBudget.tokens, verdict === "cut"));
 			samples.splice(0, samples.length - BUDGET_WINDOW);
 			persistBudget();
 		}
@@ -2593,7 +2599,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|<thinking turns> <tool results>]|budget [auto|off|reset|<planning> <acting>])",
+		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|<thinking turns> <tool results>]|budget [auto|off|reset|message|<planning> <acting>])",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
@@ -2631,11 +2637,12 @@ export default function (pi: ExtensionAPI) {
 				const fixed = /^(\d+k?)\s+(\d+k?)$/.exec(sub);
 				if (sub === "auto" || sub === "off") budgetMode = sub;
 				else if (sub === "reset") delete learned[model];
+				else if (sub === "message") budgetMessage = !budgetMessage;
 				else if (fixed) {
 					budgetMode = "fixed";
 					fixedBudget = { planning: tokens(fixed[1]!), acting: tokens(fixed[2]!) };
 				} else if (sub) {
-					ctx.ui.notify("Usage: /magi-ui budget [auto|off|reset|<planning> <acting>], e.g. 16k 4k", "warning");
+					ctx.ui.notify("Usage: /magi-ui budget [auto|off|reset|message|<planning> <acting>], e.g. 16k 4k", "warning");
 					return;
 				}
 				if (sub) persistBudget();
@@ -2648,6 +2655,7 @@ export default function (pi: ExtensionAPI) {
 					budgetMode === "off"
 						? "Thinking budget off: llama-server decides. /magi-ui budget auto"
 						: `Thinking budget ${budgetMode.toUpperCase()} · ${model || "no model"}: ${phase("planning")} · ${phase("acting")}` +
+								` · closing message ${budgetMessage ? "on" : "off"}` +
 								(swap.base ? "" : " · applies to llama-swap models only") +
 								(budgetIgnored.has(model) ? " · ⚠ llama-server thinks past it: it was started with its own --reasoning-budget (or is too old), which wins" : ""),
 					"info",

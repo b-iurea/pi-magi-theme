@@ -135,9 +135,9 @@ export function pruneContext(messages: Msg[], o: HygieneOptions = HYGIENE_DEFAUL
 }
 
 /**
- * Optional llama-server --reasoning-budget-message: when the thinking budget runs out llama.cpp forces this text,
+ * Sent as reasoning_budget_message with every request: when the thinking budget runs out llama.cpp forces this text,
  * then the end-of-thinking tag, and the model reads it as its own words, so it says what to do next.
- * Without it llama.cpp closes the thinking silently; cuts are then detected by length (budgetVerdict).
+ * A llama-server older than the per-request message closes the thinking silently; cuts are then detected by length (budgetVerdict).
  */
 export const BUDGET_MESSAGE = "Time is up. I will take the smallest safe next step with what I know, and write my open plan into PLAN.md.";
 
@@ -146,7 +146,7 @@ export type BudgetMode = "auto" | "fixed" | "off";
 
 /** Starting budgets, used until a model has enough samples to learn its own. */
 export const BUDGET_DEFAULTS: Record<BudgetPhase, number> = { planning: 16384, acting: 4096 };
-export const BUDGET_LIMITS: Record<BudgetPhase, [number, number]> = { planning: [4096, 32768], acting: [2048, 32768] };
+export const BUDGET_LIMITS: Record<BudgetPhase, [number, number]> = { planning: [4096, 32768], acting: [2048, 4096] }; // acting: past ~4k between tool calls it is overthinking
 
 const BUDGET_SAMPLES_MIN = 10;
 export const BUDGET_WINDOW = 30; // thinking lengths kept per model and phase
@@ -160,9 +160,9 @@ export function requestPhase(payload: any): BudgetPhase {
 
 /**
  * Learned budget: 1.5 × the 95th percentile of recent thinking lengths, clamped and rounded to 1k.
- * A cut thinking is recorded as the budget it hit, so while at most 5% of replies are cut (the runaway ones)
- * the budget holds; above that the percentile reaches the budget and it grows 1.5× until cuts fall back under 5%.
- * A model that thinks little pulls its budget down. Undefined until there are enough samples.
+ * Cuts never raise it (see budgetSample): a model that often runs away is held at its budget instead of chased.
+ * Replies that finish close under the budget raise it, a model that thinks little pulls it down.
+ * Undefined until there are enough samples.
  */
 export function learnedBudget(samples: number[], phase: BudgetPhase): number | undefined {
 	if (samples.length < BUDGET_SAMPLES_MIN) return undefined;
@@ -170,6 +170,11 @@ export function learnedBudget(samples: number[], phase: BudgetPhase): number | u
 	const p = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * BUDGET_PERCENTILE))]!;
 	const [lo, hi] = BUDGET_LIMITS[phase];
 	return Math.min(hi, Math.max(lo, Math.ceil((p * BUDGET_HEADROOM) / 1024) * 1024));
+}
+
+/** The sample to learn from a reply: a cut counts as budget / headroom, so cuts alone give back the same budget. */
+export function budgetSample(thought: number, budget: number, cut: boolean): number {
+	return cut ? budget / BUDGET_HEADROOM : thought;
 }
 
 /**

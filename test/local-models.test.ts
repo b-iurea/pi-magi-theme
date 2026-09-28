@@ -10,9 +10,11 @@ import {
 	PRUNED_MARK,
 	budgetVerdict,
 	learnedBudget,
+	budgetSample,
 	pruneContext,
 	requestPhase,
 	thinkingWasCut,
+	type BudgetPhase,
 	type Msg,
 } from "../extensions/magi/local-models.ts";
 
@@ -77,18 +79,18 @@ test("phase: planning after the user, acting between tool calls", () => {
 });
 
 /** Runs the budget loop the way the extension does: think, maybe get cut, record, next budget. */
-function simulate(think: (i: number) => number, turns = 300) {
+function simulate(think: (i: number) => number, phase: BudgetPhase = "acting", turns = 300) {
 	const samples: number[] = [];
 	let cuts = 0;
 	let lastCuts = 0;
-	let budget = BUDGET_DEFAULTS.acting;
+	let budget = BUDGET_DEFAULTS[phase];
 	for (let i = 0; i < turns; i++) {
-		budget = learnedBudget(samples, "acting") ?? BUDGET_DEFAULTS.acting;
+		budget = learnedBudget(samples, phase) ?? BUDGET_DEFAULTS[phase];
 		const want = think(i);
 		const cut = want > budget;
 		if (cut) cuts++;
 		if (cut && i >= turns - 100) lastCuts++;
-		samples.push(cut ? budget : want);
+		samples.push(budgetSample(want, budget, cut));
 		samples.splice(0, samples.length - BUDGET_WINDOW);
 	}
 	return { budget, cuts, lastCuts };
@@ -101,11 +103,10 @@ test("learned budget: holds on runaway outliers, cuts only them", () => {
 	assert.ok(lastCuts <= 3, `${lastCuts} cuts in the last 100 turns`); // the runaways, nothing else
 });
 
-test("learned budget: grows for a model that needs to think longer", () => {
-	// a model that routinely thinks 5–9k in this phase: the 4k default cuts it every time at first
-	const { budget, lastCuts } = simulate((i) => 5000 + ((i * 131) % 4000));
-	assert.ok(budget >= 9000, `budget ${budget}`);
-	assert.ok(lastCuts <= 5, `${lastCuts} cuts in the last 100 turns`);
+test("learned budget: frequent runaways do not drag it up", () => {
+	// a model that runs away every third turn (like Qwen3.8 Flash Next): the budget stays put and cuts them
+	const { budget } = simulate((i) => (i % 3 === 0 ? 40_000 : 100 + ((i * 97) % 600)), "planning");
+	assert.equal(budget, BUDGET_DEFAULTS.planning);
 });
 
 test("learned budget: shrinks for a model that thinks little, within the limits", () => {
