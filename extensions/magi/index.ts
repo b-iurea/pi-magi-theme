@@ -2599,7 +2599,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|<thinking turns> <tool results>]|budget [auto|off|reset|message|<planning> <acting>])",
+		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|step <tokens>|<thinking turns> <tool results>]|budget [auto|off|reset|message|<planning> <acting>])",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const arg = args.trim().toLowerCase();
@@ -2607,14 +2607,16 @@ export default function (pi: ExtensionAPI) {
 			if (arg === "hygiene" || arg.startsWith("hygiene ")) {
 				const sub = arg.slice("hygiene".length).trim();
 				const keep = /^(\d+)\s+(\d+)$/.exec(sub);
-				if (sub === "on" || sub === "off" || keep) {
+				const step = /^step\s+(\d+)(k?)$/.exec(sub);
+				if (sub === "on" || sub === "off" || keep || step) {
 					if (keep) Object.assign(hygiene, { enabled: true, keepThinkingTurns: Number(keep[1]), keepToolResults: Number(keep[2]) });
+					else if (step) hygiene.stepTokens = Math.max(1000, Number(step[1]) * (step[2] ? 1000 : 1));
 					else hygiene.enabled = sub === "on";
 					const cfg = loadMagiConfig();
-					const { enabled, keepThinkingTurns, keepToolResults } = hygiene;
-					saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled, keepThinkingTurns, keepToolResults } });
+					const { enabled, keepThinkingTurns, keepToolResults, stepTokens } = hygiene;
+					saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled, keepThinkingTurns, keepToolResults, stepTokens } });
 				} else if (sub) {
-					ctx.ui.notify("Usage: /magi-ui hygiene [on|off|<thinking turns kept> <tool results kept>], e.g. 3 5", "warning");
+					ctx.ui.notify("Usage: /magi-ui hygiene [on|off|step <tokens>|<thinking turns kept> <tool results kept>], e.g. step 40k, 3 5", "warning");
 					return;
 				}
 				const s = hygieneStats;
@@ -2622,7 +2624,7 @@ export default function (pi: ExtensionAPI) {
 					(!hygiene.enabled
 						? "Context hygiene off: /magi-ui hygiene on"
 						: s
-							? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(s.stepTokens)})`
+							? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(hygiene.stepTokens)})`
 							: "Context hygiene on: nothing sent to the model yet") +
 						` · keeps thinking of the last ${hygiene.keepThinkingTurns} turns, the last ${hygiene.keepToolResults} tool results` +
 						(state.thinkCuts ? ` · thinking cut at the budget ${state.thinkCuts}×` : ""),
