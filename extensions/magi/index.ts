@@ -17,7 +17,7 @@
  *  - while a model loads an angel attacks the MAGI: red spreads through BALTHASAR, MELCHIOR and CASPAR at the pace of
  *    the model's last load, a corner of CASPAR holds out blinking; once loaded, blue takes the MAGI back from that corner
  *  - llama-swap telemetry: VRAM, GPU load/temp/power, energy used, RAM, server-side tok/s, prompt tok/s, cache hits
- *  - /magi config → assign a model to each MAGI; /magi-ui compact|status → smaller panel, llama-swap report
+ *  - /magi config → assign a model to each MAGI; /magi compact|status → smaller panel, llama-swap report
  *
  * Fan art: the MAGI and their screen come from Neon Genesis Evangelion, all rights reserved to khara, Inc.
  * Use with the theme ../../themes/magi.json
@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { HStack, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
@@ -345,7 +345,7 @@ type Currency = "EUR" | "USD";
 
 const ui = {
 	compact: false,
-	kwhPrice: undefined as number | undefined, // price per kWh, for the COST row (/magi-ui config)
+	kwhPrice: undefined as number | undefined, // price per kWh, for the COST row (/magi cost)
 	currency: "EUR" as Currency,
 };
 
@@ -1055,7 +1055,7 @@ async function prewarmPrefix(cwd: string): Promise<void> {
 	}
 }
 
-/* ── /magi-ui status: a report built from the last requests llama-swap recorded ── */
+/* ── /magi status: a report built from the last requests llama-swap recorded ── */
 
 interface ActivityRow {
 	timestamp: string;
@@ -1376,10 +1376,10 @@ class MagiPanel implements Component {
 		return out;
 	}
 
-	/** COST: GPU energy × price per kWh set with /magi-ui config — all sessions, with this one in brackets. */
+	/** COST: GPU energy × price per kWh set with /magi cost — all sessions, with this one in brackets. */
 	private costRow(inner: number): string {
 		if (!swap.gpus.length) return this.field("COST", "—", inner, "muted");
-		if (ui.kwhPrice === undefined) return this.field("COST", "→ /magi-ui config", inner, "dim");
+		if (ui.kwhPrice === undefined) return this.field("COST", "→ /magi cost", inner, "dim");
 		const price = (wh: number) => fmtMoney((wh / 1000) * ui.kwhPrice!);
 		return this.field("COST", price(totalWh()) + this.theme.fg("dim", ` (ses ${price(swap.energyWh)})`), inner, "warning");
 	}
@@ -1535,26 +1535,26 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 	totalWh?: number; // GPU energy summed over every session, for the COST row
 	hygiene?: Partial<HygieneOptions> & { enabled?: boolean }; // context pruning for local models, see local-models.ts
 	thinkingBudget?: {
-		mode?: BudgetMode; // auto (learned per model) · fixed · off, set with /magi-ui budget
+		mode?: BudgetMode; // auto (learned per model) · fixed · off, set with /magi budget
 		planning?: number; // fixed budgets
 		acting?: number;
-		message?: boolean; // send BUDGET_MESSAGE as reasoning_budget_message (default on), /magi-ui budget message
+		message?: boolean; // send BUDGET_MESSAGE as reasoning_budget_message (default on), /magi budget message
 		learned?: Record<string, Partial<Record<BudgetPhase, number[]>>>; // written by the theme: recent thinking lengths per model
 	};
 };
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
-/** Command arguments offered by autocomplete: the full argument, and what it does. */
+/** /magi arguments that manage the theme instead of asking the council. */
+const UI_ARGS = /^(on|off|panel|compact|status|cost)$|^(hygiene|budget)(\s|$)/i; // anything else is a question
+/** /magi arguments offered by autocomplete: the full argument, and what it does. */
 const MAGI_ARGS: [string, string][] = [
 	["review", "the council reviews your pending changes before you commit"],
 	["config", "pick a model for each MAGI"],
 	["mecha", "MECHA SELECT: pick the llama-swap model to activate"],
-];
-const MAGI_UI_ARGS: [string, string][] = [
 	["status", "llama-swap report: speed, tokens, cache hits, errors per model"],
 	["panel", "hide/show the side panel"],
 	["compact", "toggle the compact side panel"],
-	["config", "electricity price and currency for the COST row"],
+	["cost", "electricity price and currency for the COST row"],
 	["on", "enable the MAGI chrome"],
 	["off", "disable the MAGI chrome"],
 	["hygiene", "show how much context was pruned"],
@@ -1790,7 +1790,7 @@ function buildDeliberationView(
 	};
 }
 
-/** A read-only boxed report (used by /magi-ui status); any key closes it. */
+/** A read-only boxed report (used by /magi status); any key closes it. */
 function buildReportView(theme: Theme, lines: string[], close: () => void) {
 	return {
 		render(width: number): string[] {
@@ -2588,10 +2588,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("magi", {
-		description: "Ask the three MAGI (pragmatist, guardian, visionary); /magi review [focus] judges the git diff; /magi config assigns models; /magi mecha picks the model",
+		description: "Ask the three MAGI, or manage them: review [focus] · config · mecha · status · panel · compact · cost · on · off · hygiene · budget (type a space to see them all)",
 		getArgumentCompletions: (prefix) => argCompletions(MAGI_ARGS, prefix),
 		handler: async (args, ctx) => {
 			const arg = args.trim();
+			if (UI_ARGS.test(arg)) return manageUi(arg, ctx);
 			if (arg === "config") return configureMagi(ctx);
 			if (arg === "mecha") {
 				if (ctx.mode !== "tui" || !swap.base) return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap model", "error");
@@ -2629,148 +2630,145 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("magi-ui", {
-		description: "MAGI chrome: enable the theme, or manage it (on|off|panel|compact|status|config|hygiene [on|off|step <tokens>|<thinking turns> <tool results>]|budget [auto|off|reset|message|<planning> <acting>])",
-		getArgumentCompletions: (prefix) => argCompletions(MAGI_UI_ARGS, prefix),
-		handler: async (args, ctx) => {
-			liveCtx = ctx;
-			const arg = args.trim().toLowerCase();
+	/** /magi on|off|panel|compact|status|cost|hygiene|budget: the theme, its panel and the local-model settings. */
+	async function manageUi(args: string, ctx: ExtensionCommandContext) {
+		liveCtx = ctx;
+		const arg = args.trim().toLowerCase();
 
-			if (arg === "hygiene" || arg.startsWith("hygiene ")) {
-				const sub = arg.slice("hygiene".length).trim();
-				const keep = /^(\d+)\s+(\d+)$/.exec(sub);
-				const step = /^step\s+(\d+)(k?)$/.exec(sub);
-				if (sub === "on" || sub === "off" || keep || step) {
-					if (keep) Object.assign(hygiene, { enabled: true, keepThinkingTurns: Number(keep[1]), keepToolResults: Number(keep[2]) });
-					else if (step) hygiene.stepTokens = Math.max(1000, Number(step[1]) * (step[2] ? 1000 : 1));
-					else hygiene.enabled = sub === "on";
-					const cfg = loadMagiConfig();
-					const { enabled, keepThinkingTurns, keepToolResults, stepTokens } = hygiene;
-					saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled, keepThinkingTurns, keepToolResults, stepTokens } });
-				} else if (sub) {
-					ctx.ui.notify("Usage: /magi-ui hygiene [on|off|step <tokens>|<thinking turns kept> <tool results kept>], e.g. step 40k, 3 5", "warning");
-					return;
-				}
-				const s = hygieneStats;
-				ctx.ui.notify(
-					(!hygiene.enabled
-						? "Context hygiene off: /magi-ui hygiene on"
-						: s
-							? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(hygiene.stepTokens)})`
-							: "Context hygiene on: nothing sent to the model yet") +
-						` · keeps thinking of the last ${hygiene.keepThinkingTurns} turns, the last ${hygiene.keepToolResults} tool results` +
-						(state.thinkCuts ? ` · thinking cut at the budget ${state.thinkCuts}×` : ""),
-					"info",
-				);
-				return;
-			}
-			if (arg === "budget" || arg.startsWith("budget ")) {
-				const sub = arg.slice("budget".length).trim();
-				const model = ctx.model?.id ?? "";
-				const tokens = (t: string) => Math.round(Number(t.replace(/k$/, "")) * (t.endsWith("k") ? 1024 : 1));
-				const fixed = /^(\d+k?)\s+(\d+k?)$/.exec(sub);
-				if (sub === "auto" || sub === "off") budgetMode = sub;
-				else if (sub === "reset") delete learned[model];
-				else if (sub === "message") budgetMessage = !budgetMessage;
-				else if (fixed) {
-					budgetMode = "fixed";
-					fixedBudget = { planning: tokens(fixed[1]!), acting: tokens(fixed[2]!) };
-				} else if (sub) {
-					ctx.ui.notify("Usage: /magi-ui budget [auto|off|reset|message|<planning> <acting>], e.g. 16k 4k", "warning");
-					return;
-				}
-				if (sub) persistBudget();
-				const phase = (p: BudgetPhase) => {
-					const n = learned[model]?.[p]?.length ?? 0;
-					const how = budgetMode === "fixed" ? "fixed" : learnedBudget(learned[model]?.[p] ?? [], p) ? `learned from ${n}` : `default, learning ${n}/10`;
-					return `${p} ${budgetFor(model, p) / 1024}k (${how})`;
-				};
-				ctx.ui.notify(
-					budgetMode === "off"
-						? "Thinking budget off: llama-server decides. /magi-ui budget auto"
-						: `Thinking budget ${budgetMode.toUpperCase()} · ${model || "no model"}: ${phase("planning")} · ${phase("acting")}` +
-								` · closing message ${budgetMessage ? "on" : "off"}` +
-								(swap.base ? "" : " · applies to llama-swap models only") +
-								(budgetIgnored.has(model) ? " · ⚠ llama-server thinks past it: it was started with its own --reasoning-budget (or is too old), which wins" : ""),
-					"info",
-				);
-				return;
-			}
-			if (arg === "panel") {
-				panelEnabled = !panelEnabled;
-				if (panelEnabled) showPanel(ctx.ui.theme);
-				else hidePanel();
-				ctx.ui.notify(`Side panel ${panelEnabled ? "enabled" : "disabled"}`, "info");
-				return;
-			}
-			if (arg === "compact") {
-				ui.compact = !ui.compact;
+		if (arg === "hygiene" || arg.startsWith("hygiene ")) {
+			const sub = arg.slice("hygiene".length).trim();
+			const keep = /^(\d+)\s+(\d+)$/.exec(sub);
+			const step = /^step\s+(\d+)(k?)$/.exec(sub);
+			if (sub === "on" || sub === "off" || keep || step) {
+				if (keep) Object.assign(hygiene, { enabled: true, keepThinkingTurns: Number(keep[1]), keepToolResults: Number(keep[2]) });
+				else if (step) hygiene.stepTokens = Math.max(1000, Number(step[1]) * (step[2] ? 1000 : 1));
+				else hygiene.enabled = sub === "on";
 				const cfg = loadMagiConfig();
-				saveMagiConfig({ ...cfg, ui: { ...cfg.ui, compact: ui.compact } });
-				repaint();
-				ctx.ui.notify(`Side panel ${ui.compact ? "compact" : "detailed"}`, "info");
+				const { enabled, keepThinkingTurns, keepToolResults, stepTokens } = hygiene;
+				saveMagiConfig({ ...cfg, hygiene: { ...cfg.hygiene, enabled, keepThinkingTurns, keepToolResults, stepTokens } });
+			} else if (sub) {
+				ctx.ui.notify("Usage: /magi hygiene [on|off|step <tokens>|<thinking turns kept> <tool results kept>], e.g. step 40k, 3 5", "warning");
 				return;
 			}
-			if (arg === "config") {
-				const currency = await ctx.ui.select(`Currency for COST (current: ${ui.currency})`, ["EUR", "USD"]);
-				if (!currency) return;
-				const current = ui.kwhPrice !== undefined ? ` (current: ${ui.kwhPrice})` : "";
-				const raw = (await ctx.ui.input(`Electricity price per kWh in ${currency}${current}:`, "0.30"))?.trim();
-				if (raw === undefined) return;
-				const price = raw === "" && ui.kwhPrice !== undefined ? ui.kwhPrice : Number(raw.replace(",", "."));
-				if (raw === "" && ui.kwhPrice === undefined) {
-					ctx.ui.notify("No price entered: COST unchanged", "warning");
-					return;
-				}
-				if (!Number.isFinite(price) || price < 0) {
-					ctx.ui.notify(`Invalid price: "${raw}"`, "error");
-					return;
-				}
-				ui.currency = currency === "USD" ? "USD" : "EUR";
-				ui.kwhPrice = price;
-				const cfg = loadMagiConfig();
-				saveMagiConfig({ ...cfg, ui: { ...cfg.ui, currency: ui.currency, kwhPrice: price } });
-				repaint();
-				ctx.ui.notify(`COST: ${fmtMoney(price)} per kWh`, "info");
+			const s = hygieneStats;
+			ctx.ui.notify(
+				(!hygiene.enabled
+					? "Context hygiene off: /magi hygiene on"
+					: s
+						? `Context hygiene: ${fmtTokens(s.prunedTokens)} tokens pruned in the first ${s.watermark}/${s.messages} messages, ${fmtTokens(s.pendingTokens)} waiting for the next step (every ${fmtTokens(hygiene.stepTokens)})`
+						: "Context hygiene on: nothing sent to the model yet") +
+					` · keeps thinking of the last ${hygiene.keepThinkingTurns} turns, the last ${hygiene.keepToolResults} tool results` +
+					(state.thinkCuts ? ` · thinking cut at the budget ${state.thinkCuts}×` : ""),
+				"info",
+			);
+			return;
+		}
+		if (arg === "budget" || arg.startsWith("budget ")) {
+			const sub = arg.slice("budget".length).trim();
+			const model = ctx.model?.id ?? "";
+			const tokens = (t: string) => Math.round(Number(t.replace(/k$/, "")) * (t.endsWith("k") ? 1024 : 1));
+			const fixed = /^(\d+k?)\s+(\d+k?)$/.exec(sub);
+			if (sub === "auto" || sub === "off") budgetMode = sub;
+			else if (sub === "reset") delete learned[model];
+			else if (sub === "message") budgetMessage = !budgetMessage;
+			else if (fixed) {
+				budgetMode = "fixed";
+				fixedBudget = { planning: tokens(fixed[1]!), acting: tokens(fixed[2]!) };
+			} else if (sub) {
+				ctx.ui.notify("Usage: /magi budget [auto|off|reset|message|<planning> <acting>], e.g. 16k 4k", "warning");
 				return;
 			}
-			if (arg === "status") {
-				if (!swap.base) {
-					ctx.ui.notify("/magi-ui status needs a llama-swap session model", "warning");
-					return;
-				}
-				let report: { data?: ActivityRow[]; total?: number };
-				try {
-					report = (await (await swapGet(`/api/metrics/activity?limit=${ACTIVITY_REPORT_ROWS}`, 15_000)).json()) as typeof report;
-				} catch (err) {
-					ctx.ui.notify(`llama-swap status failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-					return;
-				}
-				const rows = report.data ?? [];
-				if (!rows.length) {
-					ctx.ui.notify("llama-swap has no recorded requests yet", "info");
-					return;
-				}
-				await ctx.ui.custom<void>((_tui, theme, _keys, done) =>
-					buildReportView(theme, activityReport(theme, rows, report.total ?? rows.length), () => done(undefined)),
-				);
+			if (sub) persistBudget();
+			const phase = (p: BudgetPhase) => {
+				const n = learned[model]?.[p]?.length ?? 0;
+				const how = budgetMode === "fixed" ? "fixed" : learnedBudget(learned[model]?.[p] ?? [], p) ? `learned from ${n}` : `default, learning ${n}/10`;
+				return `${p} ${budgetFor(model, p) / 1024}k (${how})`;
+			};
+			ctx.ui.notify(
+				budgetMode === "off"
+					? "Thinking budget off: llama-server decides. /magi budget auto"
+					: `Thinking budget ${budgetMode.toUpperCase()} · ${model || "no model"}: ${phase("planning")} · ${phase("acting")}` +
+							` · closing message ${budgetMessage ? "on" : "off"}` +
+							(swap.base ? "" : " · applies to llama-swap models only") +
+							(budgetIgnored.has(model) ? " · ⚠ llama-server thinks past it: it was started with its own --reasoning-budget (or is too old), which wins" : ""),
+				"info",
+			);
+			return;
+		}
+		if (arg === "panel") {
+			panelEnabled = !panelEnabled;
+			if (panelEnabled) showPanel(ctx.ui.theme);
+			else hidePanel();
+			ctx.ui.notify(`Side panel ${panelEnabled ? "enabled" : "disabled"}`, "info");
+			return;
+		}
+		if (arg === "compact") {
+			ui.compact = !ui.compact;
+			const cfg = loadMagiConfig();
+			saveMagiConfig({ ...cfg, ui: { ...cfg.ui, compact: ui.compact } });
+			repaint();
+			ctx.ui.notify(`Side panel ${ui.compact ? "compact" : "detailed"}`, "info");
+			return;
+		}
+		if (arg === "cost") {
+			const currency = await ctx.ui.select(`Currency for COST (current: ${ui.currency})`, ["EUR", "USD"]);
+			if (!currency) return;
+			const current = ui.kwhPrice !== undefined ? ` (current: ${ui.kwhPrice})` : "";
+			const raw = (await ctx.ui.input(`Electricity price per kWh in ${currency}${current}:`, "0.30"))?.trim();
+			if (raw === undefined) return;
+			const price = raw === "" && ui.kwhPrice !== undefined ? ui.kwhPrice : Number(raw.replace(",", "."));
+			if (raw === "" && ui.kwhPrice === undefined) {
+				ctx.ui.notify("No price entered: COST unchanged", "warning");
 				return;
 			}
-			if (arg === "off" || arg === "on") {
-				chrome = arg === "on";
-				applyChrome(ctx);
-				ctx.ui.notify(`MAGI chrome ${chrome ? "enabled" : "disabled"}`, "info");
+			if (!Number.isFinite(price) || price < 0) {
+				ctx.ui.notify(`Invalid price: "${raw}"`, "error");
 				return;
 			}
-
-			const res = ctx.ui.setTheme("magi");
-			if (!res.success) {
-				ctx.ui.notify(`Theme magi not found: ${res.error}`, "error");
+			ui.currency = currency === "USD" ? "USD" : "EUR";
+			ui.kwhPrice = price;
+			const cfg = loadMagiConfig();
+			saveMagiConfig({ ...cfg, ui: { ...cfg.ui, currency: ui.currency, kwhPrice: price } });
+			repaint();
+			ctx.ui.notify(`COST: ${fmtMoney(price)} per kWh`, "info");
+			return;
+		}
+		if (arg === "status") {
+			if (!swap.base) {
+				ctx.ui.notify("/magi status needs a llama-swap session model", "warning");
 				return;
 			}
-			chrome = true;
+			let report: { data?: ActivityRow[]; total?: number };
+			try {
+				report = (await (await swapGet(`/api/metrics/activity?limit=${ACTIVITY_REPORT_ROWS}`, 15_000)).json()) as typeof report;
+			} catch (err) {
+				ctx.ui.notify(`llama-swap status failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+				return;
+			}
+			const rows = report.data ?? [];
+			if (!rows.length) {
+				ctx.ui.notify("llama-swap has no recorded requests yet", "info");
+				return;
+			}
+			await ctx.ui.custom<void>((_tui, theme, _keys, done) =>
+				buildReportView(theme, activityReport(theme, rows, report.total ?? rows.length), () => done(undefined)),
+			);
+			return;
+		}
+		if (arg === "off") {
+			chrome = false;
 			applyChrome(ctx);
-			ctx.ui.notify("MAGI online — /magi-ui panel|compact|status|off", "info");
-		},
-	});
+			ctx.ui.notify("MAGI chrome disabled", "info");
+			return;
+		}
+
+		const res = ctx.ui.setTheme("magi");
+		if (!res.success) {
+			ctx.ui.notify(`Theme magi not found: ${res.error}`, "error");
+			return;
+		}
+		chrome = true;
+		applyChrome(ctx);
+		ctx.ui.notify("MAGI online — /magi panel|compact|status|off", "info");
+	}
 }

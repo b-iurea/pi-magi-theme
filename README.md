@@ -40,14 +40,14 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
 | `/magi config` | pick a model for each MAGI |
 | `/magi mecha` | MECHA SELECT: pick the llama-swap model to activate, each shown as a mecha head lit by its real state |
-| `/magi-ui compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
-| `/magi-ui status` | llama-swap report from its last 100 requests: speed, tokens, cache hits, MTP draft acceptance, durations, errors per model |
-| `/magi-ui config` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
-| `/magi-ui panel` · `on` · `off` | hide/show the side panel, enable/disable the whole chrome |
-| `/magi-ui hygiene` · `on` · `off` · `step <tokens>` · `<turns> <results>` | show how much context the hygiene pruned; enable/disable it; how many prunable tokens make a pruning step (e.g. `step 40k`, default 15k); how many recent turns keep their thinking and how many tool results stay whole (e.g. `3 5`) |
-| `/magi-ui budget` · `auto` · `off` · `reset` · `message` · `<planning> <acting>` | show the thinking budget of the current model; learn it per model (default); leave it to llama-server; forget what was learned for this model; turn the closing message off/on; or fix it (e.g. `16k 4k`) |
+| `/magi compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
+| `/magi status` | llama-swap report from its last 100 requests: speed, tokens, cache hits, MTP draft acceptance, durations, errors per model |
+| `/magi cost` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
+| `/magi panel` · `on` · `off` | hide/show the side panel, enable/disable the whole chrome |
+| `/magi hygiene` · `on` · `off` · `step <tokens>` · `<turns> <results>` | show how much context the hygiene pruned; enable/disable it; how many prunable tokens make a pruning step (e.g. `step 40k`, default 15k); how many recent turns keep their thinking and how many tool results stay whole (e.g. `3 5`) |
+| `/magi budget` · `auto` · `off` · `reset` · `message` · `<planning> <acting>` | show the thinking budget of the current model; learn it per model (default); leave it to llama-server; forget what was learned for this model; turn the closing message off/on; or fix it (e.g. `16k 4k`) |
 
-Type `/magi ` or `/magi-ui ` (with the space) to see every option with a short description; keep typing to narrow it down, Tab or Enter to pick one.
+Everything lives under `/magi`: type `/magi ` (with the space) to see every option with a short description; keep typing to narrow it down, Tab or Enter to pick one. Anything that is not an option is a question for the council.
 
 ## Lore ↔ function
 
@@ -99,8 +99,8 @@ Local models run out of context on long tasks well before they run out of work. 
 
 Nothing needs setting up in llama-swap. The defaults suit most tasks; two adjustments are worth knowing:
 
-- **Long tasks: `/magi-ui hygiene step 40k`.** Each time the hygiene trims, the server has to re-read part of the conversation, and on some models (see *Hybrid models* below) almost all of it, which can take a few minutes. A step of 40k trims less often: on a real session it cut the re-reading from ~6 minutes to ~1.
-- **A model that really needs to think longer: `/magi-ui budget <planning> <acting>`**, e.g. `/magi-ui budget 16k 8k`. Frequent ✂ cuts in the side panel are the sign.
+- **Long tasks: `/magi hygiene step 40k`.** Each time the hygiene trims, the server has to re-read part of the conversation, and on some models (see *Hybrid models* below) almost all of it, which can take a few minutes. A step of 40k trims less often: on a real session it cut the re-reading from ~6 minutes to ~1.
+- **A model that really needs to think longer: `/magi budget <planning> <acting>`**, e.g. `/magi budget 16k 8k`. Frequent ✂ cuts in the side panel are the sign.
 
 ### How it works
 
@@ -112,9 +112,9 @@ For the curious, and for tuning.
 
 **Thinking budget.** MAGI sends the limit with every request (`thinking_budget_tokens`), and llama.cpp applies it. It learns per model and per phase: 1.5 × the 95th percentile of the model's last 30 thinking lengths, rounded up to 1k. A cut is recorded as 1/1.5 of the limit it hit, so cuts never raise the limit: a model that often runs away is held, not chased. Replies that end close under the limit raise it; a model that thinks little lowers it. Limits: planning 4k–32k, acting 2k–4k (past ~4k between two tool calls it is overthinking). Until a model has 10 replies in a phase it uses 16k / 4k.
 
-When the limit is reached llama.cpp does not abort the reply: it inserts the closing sentence and the end-of-thinking tag, and the model goes on to act. MAGI sends that sentence with every request too (`reasoning_budget_message`; `/magi-ui budget message` turns it off and on). `MAGI.md` tells the model what to do after a cut (one small verifiable step, the open plan into `PLAN.md`), and the next turn gets a fresh budget.
+When the limit is reached llama.cpp does not abort the reply: it inserts the closing sentence and the end-of-thinking tag, and the model goes on to act. MAGI sends that sentence with every request too (`reasoning_budget_message`; `/magi budget message` turns it off and on). `MAGI.md` tells the model what to do after a cut (one small verifiable step, the open plan into `PLAN.md`), and the next turn gets a fresh budget.
 
-**llama-server versions.** The per-request limit works whenever llama-server was started without `--reasoning-budget`, which is the default. If it was started with one, the server's limit wins: MAGI notices the model thinking well past its own limit and `/magi-ui budget` says so. A llama-server too old for the closing sentence ends the thinking silently, and MAGI detects the cut by its length.
+**llama-server versions.** The per-request limit works whenever llama-server was started without `--reasoning-budget`, which is the default. If it was started with one, the server's limit wins: MAGI notices the model thinking well past its own limit and `/magi budget` says so. A llama-server too old for the closing sentence ends the thinking silently, and MAGI detects the cut by its length.
 
 **Loop guard details.** A tool call counts as identical when both the tool and its arguments match. A file write or edit that copies a `<<pruned by MAGI…>>` note into a file is blocked too.
 
@@ -134,7 +134,7 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 
 ## Configuration
 
-`~/.pi/agent/magi.json` (written by `/magi config`, `/magi-ui compact` and `/magi-ui config`, editable by hand):
+`~/.pi/agent/magi.json` (written by `/magi config`, `/magi compact` and `/magi cost`, editable by hand):
 
 ```json
 {
@@ -151,7 +151,7 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `ui.compact`: start with the compact side panel;
 - `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy by this price, showing the running total of every session with the current one in brackets;
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
-- `hygiene` and `thinkingBudget` are set with `/magi-ui hygiene` and `/magi-ui budget` (`hygiene.minPruneChars` by hand only); `thinkingBudget.message` sends the closing message with every request (default `true`); `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
+- `hygiene` and `thinkingBudget` are set with `/magi hygiene` and `/magi budget` (`hygiene.minPruneChars` by hand only); `thinkingBudget.message` sends the closing message with every request (default `true`); `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
 - `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
 
 ## Release
