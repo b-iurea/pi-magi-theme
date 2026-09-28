@@ -45,7 +45,7 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi-ui config` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
 | `/magi-ui panel` · `on` · `off` | hide/show the side panel, enable/disable the whole chrome |
 | `/magi-ui hygiene` · `on` · `off` · `<turns> <results>` | show how much context the hygiene pruned; enable/disable it; how many recent turns keep their thinking and how many tool results stay whole (e.g. `3 5`) |
-| `/magi-ui budget` · `auto` · `off` · `reset` · `<planning> <acting>` | show the thinking budget of the current model; learn it per model (default); leave it to llama-server; forget what was learned for this model; or fix it (e.g. `16k 4k`) |
+| `/magi-ui budget` · `auto` · `off` · `reset` · `message` · `<planning> <acting>` | show the thinking budget of the current model; learn it per model (default); leave it to llama-server; forget what was learned for this model; turn the closing message off/on; or fix it (e.g. `16k 4k`) |
 
 ## Lore ↔ function
 
@@ -86,14 +86,13 @@ pi install npm:pi-smart-compact
 
 It extracts files, errors, decisions and open loops locally (no LLM calls), then synthesizes and verifies the summary. Point its `summaryModel` at a local model to keep compaction free. When it is installed, the sixth seal suggests `/smart-compact`, the seals name it while they break (`✶ BREAKING THE SEALS · smart-compact · 4s`) and the seventh seal reports who actually produced the summary: `smart-compact`, or `pi native` if it fell back to pi's own compactor.
 
-## Local models: context hygiene, loop guard, MAGI.md
+## Local models: context hygiene, thinking budget, loop guard, MAGI.md
 
 Local models run out of context on long tasks well before they run out of work. MAGI keeps them going:
 
-- **Context hygiene.** Before every request, old thinking blocks, old tool outputs and old `write`/`edit` payloads are replaced by a one-line `<<pruned by MAGI…>>` marker in what the model sees; the saved session stays whole. The newest 3 turns keep their thinking and the newest 5 tool results stay whole. Pruning advances in steps of ~15k tokens behind a watermark, so between steps the prompt only grows at the end and llama.cpp keeps reusing its KV cache. Replayed on two real 104k/119k-token sessions it keeps them at ~64k/~47k. Old tool outputs are masked instead of summarized: [simple observation masking matches LLM summarization at half the cost](https://arxiv.org/abs/2508.21433).
+- **Context hygiene.** Before every request, old thinking blocks, old tool outputs and old `write`/`edit` payloads are replaced by a one-line `<<pruned by MAGI…>>` marker in what the model sees; the saved session stays whole. The newest 3 turns keep their thinking and the newest 5 tool results stay whole. Pruning advances in steps of ~15k tokens behind a watermark, so between steps the prompt only grows at the end and llama.cpp keeps reusing its KV cache; each step makes llama-server re-read the prompt from the first pruned message, which is why steps are large and rare. Replayed on two real 104k/119k-token sessions it keeps them at ~64k/~47k. Old tool outputs are masked instead of summarized: [simple observation masking matches LLM summarization at half the cost](https://arxiv.org/abs/2508.21433).
 - **Loop guard.** The same tool call with the same arguments three times in a row is blocked with a message asking the model to change approach; a `write`/`edit` that copies a pruned marker into a file is blocked too.
 - **MAGI.md.** Created in the project on the first start (never overwritten) and appended to the system prompt on every run: short rules against the usual local-model failures (overthinking, reading whole files, invented paths, unverified success, blind retries), and a PLAN.md/NOTES.md habit so the task state survives pruning and compaction. Edit it per project; delete it to get the defaults back.
-
 - **Thinking budget.** A runaway think inside a single turn is stopped by llama.cpp's thinking budget, set by MAGI on every request, separately for planning (right after you write) and acting (between tool calls, where long thinking is mostly overthinking). It learns itself per model: 1.5 × the 95th percentile of the model's last 30 thinking lengths in that phase, a cut counting as 1/1.5 of the budget it hit, so cuts never raise it: a model that often runs away is held at its budget, not chased. Replies that finish close under the budget raise it, a model that thinks little pulls it down (limits: planning 4k–32k, acting 2k–4k: past ~4k between tool calls it is overthinking). Until a model has 10 replies in a phase it starts from 16k / 4k. When the budget runs out llama.cpp does not abort the reply: it forces a closing sentence and the end-of-thinking tag, and the model goes on to act. MAGI.md tells it what to do then (a small verifiable step, the open plan into PLAN.md), and the cut thinking stays in context for the next turn, which gets a fresh budget. The side panel counts the cuts (`HYGIENE -18.2k ✂2`); frequent cuts mean the model runs away often; raise the budget by hand with `/magi-ui budget <planning> <acting>` if it really needs longer.
 
   Nothing to change in llama-swap: llama-server applies the per-request budget whenever it was started without `--reasoning-budget`, which is the default. If it was started with one, the server's budget wins: MAGI notices the model thinking well past its own budget and `/magi-ui budget` says so. The closing sentence (*"Time is up. I will take the smallest safe next step…"*) is sent with every request too (`/magi-ui budget message` turns it off and on); a llama-server too old to read it ignores it, closes the thinking silently, and MAGI detects the cut by its length.
@@ -123,7 +122,7 @@ Each nature is a lens, not a specialty, so the council answers any question, not
   "loads": { "qwen3.8-27b": 41200 },
   "totalWh": 1843.2,
   "hygiene": { "enabled": true, "keepThinkingTurns": 3, "keepToolResults": 5, "stepTokens": 15000, "minPruneChars": 600 },
-  "thinkingBudget": { "mode": "auto", "planning": 16384, "acting": 4096, "learned": { "qwen3.8-27b": { "acting": [812, 430, 2211] } } }
+  "thinkingBudget": { "mode": "auto", "planning": 16384, "acting": 4096, "message": true, "learned": { "qwen3.8-27b": { "acting": [812, 430, 2211] } } }
 }
 ```
 
@@ -131,7 +130,7 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `ui.compact`: start with the compact side panel;
 - `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy by this price, showing the running total of every session with the current one in brackets;
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
-- `hygiene` and `thinkingBudget` are set with `/magi-ui hygiene` and `/magi-ui budget`; `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
+- `hygiene` and `thinkingBudget` are set with `/magi-ui hygiene` and `/magi-ui budget` (`hygiene.stepTokens` and `hygiene.minPruneChars` by hand only); `thinkingBudget.message` sends the closing message with every request (default `true`); `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
 - `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
 
 ## Release
