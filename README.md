@@ -37,6 +37,8 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | Command | What it does |
 |---------|--------------|
 | `/magi <question>` | the council answers a question (recent conversation as context) |
+| `/magi plan [goal]` · `plan off` | SIMULATION: plan a long task with the model; only `PLAN.md` and `NOTES.md` can be written |
+| `/magi execute` | LIFT-OFF: run `PLAN.md` one step per fresh session; MAGI verifies, ticks and commits each step |
 | `/magi review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
 | `/magi config` | pick a model for each MAGI |
 | `/magi mecha` | MECHA SELECT: pick the llama-swap model to activate, each shown as a mecha head lit by its real state |
@@ -117,6 +119,23 @@ When the limit is reached llama.cpp does not abort the reply: it inserts the clo
 **llama-server versions.** The per-request limit works whenever llama-server was started without `--reasoning-budget`, which is the default. If it was started with one, the server's limit wins: MAGI notices the model thinking well past its own limit and `/magi budget` says so. A llama-server too old for the closing sentence ends the thinking silently, and MAGI detects the cut by its length.
 
 **Loop guard details.** A tool call counts as identical when both the tool and its arguments match. A file write or edit that copies a `<<pruned by MAGI…>>` note into a file is blocked too.
+
+## Long tasks: SIMULATION and LIFT-OFF
+
+Local models handle short tasks well and long ones badly: the context grows, compaction loses details, one error spoils the rest. So a long task is split in two, and its memory lives on disk (`PLAN.md`, `NOTES.md`, git), never in a context window.
+
+- **`/magi plan <goal>`: SIMULATION.** A normal session, with the thinking budget at its planning level and every write outside `PLAN.md` and `NOTES.md` blocked. You and the model explore the code and write the plan, one line per step:
+
+  ```
+  - [ ] Add the slam test — verify: `npm test -- slam`
+  ```
+
+  Every step needs a verify command that exits 0 only when the step works. `NOTES.md` holds what the executor must know: key files, commands that work, decisions, pitfalls.
+- **`/magi execute`: LIFT-OFF.** MAGI commits the plan, then launches the first unticked step in a fresh session that knows only `PLAN.md`, `NOTES.md` and the code. When the model stops, MAGI runs the verify command itself: if it passes, it ticks the step and commits (`LIFT-OFF 3/8: …`), then launches the next. A failed step gets one retry in a fresh session with the failure output; a second failure stops the sortie and leaves the work uncommitted for you to look at. Esc stops it too.
+
+A line above the editor shows where you are (`NERV LIFT-OFF 3/8 ■■■▶□□□□ ▸ step`). Each LIFT-OFF is a normal pi session, saved and linked to the one that launched it: open it with `/resume` to see what the model did. The model never reads them: between steps it only has what was written in `NOTES.md`.
+
+LIFT-OFF needs a git repository with no pending changes other than `PLAN.md`, `NOTES.md` and `MAGI.md`.
 
 ## The council
 

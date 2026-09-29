@@ -26,7 +26,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
@@ -52,6 +52,7 @@ import {
 	type HygieneOptions,
 	type HygieneStats,
 } from "./local-models.ts";
+import { NOTES_FILE, PLAN_FILE, liftOffPrompt, parsePlan, planProblem, progressBar, simulationPrompt, tickStep, type PlanStep } from "./sortie.ts";
 
 /* ────────────────────────────────────────────────────────────── art ── */
 
@@ -1546,8 +1547,13 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
 /** /magi arguments that manage the theme instead of asking the council. */
 const UI_ARGS = /^(on|off|panel|compact|status|cost)$|^(hygiene|budget)(\s|$)/i; // anything else is a question
+const VERIFY_TIMEOUT_MS = 15 * 60_000; // a LIFT-OFF verify command that runs longer counts as failed
+const FAILURE_TAIL = 3000; // characters of a failed verification shown to the retry
 /** /magi arguments offered by autocomplete: the full argument, and what it does. */
 const MAGI_ARGS: [string, string][] = [
+	["plan", "SIMULATION: plan a long task with the model, only PLAN.md and NOTES.md can change"],
+	["plan off", "leave SIMULATION"],
+	["execute", "LIFT-OFF: run PLAN.md one step per fresh session, verify and commit each"],
 	["review", "the council reviews your pending changes before you commit"],
 	["config", "pick a model for each MAGI"],
 	["mecha", "MECHA SELECT: pick the llama-swap model to activate"],
@@ -1627,6 +1633,16 @@ function conversationExcerpt(ctx: ExtensionContext, maxChars = 6000): string {
 }
 
 const REVIEW_MAX_CHARS = 24_000;
+
+/** Runs a command in the project: exit code 0 or not, with stdout and stderr together. */
+async function run(cwd: string, file: string, args: string[], timeout = 60_000): Promise<{ ok: boolean; out: string }> {
+	try {
+		const r = await promisify(execFile)(file, args, { cwd, timeout, maxBuffer: 32 * 1024 * 1024 });
+		return { ok: true, out: r.stdout + r.stderr };
+	} catch (err: any) {
+		return { ok: false, out: `${err.stdout ?? ""}${err.stderr ?? ""}` || String(err.message ?? err) };
+	}
+}
 
 /** The pending changes for /magi review: tracked changes against HEAD plus the names of untracked files. */
 async function pendingChanges(cwd: string): Promise<{ diff: string; untracked: string[] }> {
@@ -2083,6 +2099,7 @@ function windowTitle(cwd: string, done = false): string {
 
 export default function (pi: ExtensionAPI) {
 	let chrome = true;
+	let simulation = false; // /magi plan: writes outside PLAN.md and NOTES.md are blocked
 	let panelEnabled = true;
 	let tuiRef: TUI | undefined;
 	let panelHandle: OverlayHandle | undefined;
@@ -2293,7 +2310,9 @@ export default function (pi: ExtensionAPI) {
 		applyChrome(ctx);
 		// nothing is loaded at startup: a new session picks its MECHA unit, a resumed one shows whether its model is in VRAM
 		const fresh = event.reason === "new" || (event.reason === "startup" && !ctx.sessionManager.getBranch().some((e) => e.type === "message"));
-		void probeModel(ctx).then(() => (fresh && chrome && swap.base ? pickModel(ctx) : undefined));
+		// a LIFT-OFF session (it has a parent) runs unattended: no MECHA picker
+		const pick = fresh && chrome && swap.base && !ctx.sessionManager.getHeader()?.parentSession;
+		void probeModel(ctx).then(() => (pick ? pickModel(ctx) : undefined));
 		// GPU stats every 3s while something happens, every 30s when idle
 		metricsTimer ??= setInterval(() => {
 			const now = Date.now();
@@ -2335,7 +2354,7 @@ export default function (pi: ExtensionAPI) {
 		rememberPrefix(ctx.cwd, event.payload);
 		// llama.cpp honours a per-request thinking budget only when llama-server runs without --reasoning-budget
 		if (budgetMode === "off" || !swap.base || !ctx.model) return;
-		const phase = requestPhase(event.payload);
+		const phase = simulation ? "planning" : requestPhase(event.payload);
 		pendingBudget = { model: ctx.model.id, phase, tokens: budgetFor(ctx.model.id, phase) };
 		const payload = { ...(event.payload as object), thinking_budget_tokens: pendingBudget.tokens };
 		return budgetMessage ? { ...payload, reasoning_budget_message: `\n\n${BUDGET_MESSAGE}` } : payload;
@@ -2361,7 +2380,9 @@ export default function (pi: ExtensionAPI) {
 		hidePanel();
 	});
 
-	pi.on("agent_start", async () => {
+	pi.on("agent_start", async (_event, ctx) => {
+		// back to normal work: the last SIMULATION or LIFT-OFF line goes away
+		if (!simulation && !ctx.sessionManager.getHeader()?.parentSession) ctx.ui.setWidget("magi-sortie", undefined);
 		state.runStart = Date.now();
 		lastCall = "";
 	});
@@ -2386,8 +2407,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// local models loop on the same call, and may copy a pruned placeholder into a file
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		const args = JSON.stringify(event.input);
+		if (simulation && (event.toolName === "write" || event.toolName === "edit")) {
+			const target = resolve(ctx.cwd, String((event.input as any).path ?? (event.input as any).file_path ?? ""));
+			if (target !== join(ctx.cwd, PLAN_FILE) && target !== join(ctx.cwd, NOTES_FILE)) {
+				return { block: true, reason: `MAGI SIMULATION: only ${PLAN_FILE} and ${NOTES_FILE} can change while planning. Put this change in the plan as a step.` };
+			}
+		}
 		if ((event.toolName === "write" || event.toolName === "edit") && args.includes(PRUNED_MARK)) {
 			return { block: true, reason: `MAGI: this ${event.toolName} contains a "${PRUNED_MARK}" placeholder, not real content. Read the file and use the actual text.` };
 		}
@@ -2587,12 +2614,113 @@ export default function (pi: ExtensionAPI) {
 		repaint();
 	}
 
+	/** The line above the editor while a SIMULATION or a LIFT-OFF is on. */
+	function sortieWidget(ctx: ExtensionContext, title: string, tone: ThemeColor, detail: string) {
+		const t = ctx.ui.theme;
+		ctx.ui.setWidget("magi-sortie", [t.fg(tone, "▌") + t.bold(t.fg("accent", "NERV ")) + " " + t.bold(t.fg(tone, title)) + "  " + t.fg("muted", detail)]);
+	}
+
+	/** /magi execute: checks the plan and the repository, commits the plan, then launches the first step. */
+	async function execute(ctx: ExtensionCommandContext) {
+		let steps: PlanStep[];
+		try {
+			steps = parsePlan(readFileSync(join(ctx.cwd, PLAN_FILE), "utf8"));
+		} catch {
+			return ctx.ui.notify(`LIFT-OFF needs a ${PLAN_FILE}: write one with /magi plan <goal>`, "error");
+		}
+		const problem = planProblem(steps);
+		if (problem) return ctx.ui.notify(`LIFT-OFF aborted: ${problem}`, "error");
+		const status = await run(ctx.cwd, "git", ["status", "--porcelain"]);
+		if (!status.ok) return ctx.ui.notify("LIFT-OFF needs a git repository: every step is a commit", "error");
+		// the plan files may be pending; anything else would end up in the first step's commit
+		const foreign = status.out.split("\n").filter((l) => l.trim() && ![PLAN_FILE, NOTES_FILE, "MAGI.md"].includes(l.slice(3).trim()));
+		if (foreign.length) return ctx.ui.notify(`LIFT-OFF aborted: commit or stash your changes first (${foreign.length} files)`, "error");
+		if (status.out.trim()) {
+			await run(ctx.cwd, "git", ["add", "-A"]);
+			await run(ctx.cwd, "git", ["commit", "-qm", "SIMULATION: flight plan"]);
+		}
+		simulation = false;
+		await ctx.waitForIdle();
+		return liftOff(ctx, ctx.sessionManager.getSessionFile(), 2 * steps.filter((s) => !s.done).length);
+	}
+
+	/**
+	 * One LIFT-OFF: a fresh session runs the first unticked step, MAGI runs its verify command, ticks it and commits,
+	 * then launches the next. A failed step gets one retry with the failure output; Esc, a second failure or
+	 * running out of launches ends the sortie. Runs in this closure across sessions: only the ctx passed in is live.
+	 */
+	async function liftOff(ctx: ExtensionCommandContext, origin: string | undefined, launches: number, failure?: string): Promise<void> {
+		const cwd = ctx.cwd;
+		const steps = parsePlan(readFileSync(join(cwd, PLAN_FILE), "utf8"));
+		const index = steps.findIndex((s) => !s.done);
+		if (index < 0) {
+			sortieWidget(ctx, "MISSION COMPLETE", "success", `${progressBar(steps.length, steps.length)}  ${steps.length} steps, one commit each`);
+			return ctx.ui.notify("LIFT-OFF: mission complete", "info");
+		}
+		const step = steps[index]!;
+		if (launches <= 0) {
+			sortieWidget(ctx, "RETREAT", "error", `out of launches at step ${index + 1}/${steps.length}`);
+			return ctx.ui.notify("LIFT-OFF stopped: out of launches", "error");
+		}
+		const label = `LIFT-OFF ${index + 1}/${steps.length}`;
+		await ctx.newSession({
+			parentSession: origin,
+			withSession: async (ctx) => {
+				const detail = failure ? "✗ UNIT DAMAGED ─ retry 1/1" : "▸";
+				sortieWidget(ctx, label, failure ? "warning" : "accent", `${progressBar(steps.length, index, !!failure)}  ${detail} ${step.text}`);
+				await ctx.sendUserMessage(liftOffPrompt(step, index + 1, steps.length, failure));
+				await ctx.waitForIdle();
+				const last = ctx.sessionManager
+					.getBranch()
+					.filter((e: any) => e.type === "message" && e.message.role === "assistant")
+					.at(-1) as any;
+				if (last?.message.stopReason === "aborted") {
+					sortieWidget(ctx, "ABORT", "error", `${label} stopped by you: nothing committed`);
+					return;
+				}
+				const check = await run(cwd, "bash", ["-c", step.verify!], VERIFY_TIMEOUT_MS);
+				if (!check.ok) {
+					const tail = check.out.slice(-FAILURE_TAIL);
+					if (!failure) return liftOff(ctx, origin, launches - 1, tail);
+					sortieWidget(ctx, "RETREAT", "error", `${label} failed twice: ${tail.trim().split("\n").at(-1) ?? ""}`);
+					return ctx.ui.notify(`LIFT-OFF stopped: "${step.text}" failed its verification twice, work left uncommitted`, "error");
+				}
+				const ticked = tickStep(readFileSync(join(cwd, PLAN_FILE), "utf8"), step.text);
+				if (!ticked) {
+					sortieWidget(ctx, "RETREAT", "error", `${label}: the step is no longer in ${PLAN_FILE}`);
+					return ctx.ui.notify(`LIFT-OFF stopped: ${PLAN_FILE} was changed and the step is gone`, "error");
+				}
+				writeFileSync(join(cwd, PLAN_FILE), ticked);
+				await run(cwd, "git", ["add", "-A"]);
+				const commit = await run(cwd, "git", ["commit", "-qm", `${label}: ${step.text}`]);
+				if (!commit.ok) {
+					sortieWidget(ctx, "RETREAT", "error", `${label}: git commit failed`);
+					return ctx.ui.notify(`LIFT-OFF stopped: git commit failed: ${commit.out.trim()}`, "error");
+				}
+				return liftOff(ctx, origin, launches - 1);
+			},
+		});
+	}
+
 	pi.registerCommand("magi", {
-		description: "Ask the three MAGI, or manage them: review [focus] · config · mecha · status · panel · compact · cost · on · off · hygiene · budget (type a space to see them all)",
+		description: "Ask the three MAGI, or manage them: plan [goal] · execute · review [focus] · config · mecha · status · panel · compact · cost · on · off · hygiene · budget (type a space to see them all)",
 		getArgumentCompletions: (prefix) => argCompletions(MAGI_ARGS, prefix),
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (UI_ARGS.test(arg)) return manageUi(arg, ctx);
+			if (arg === "plan off") {
+				simulation = false;
+				ctx.ui.setWidget("magi-sortie", undefined);
+				return ctx.ui.notify("SIMULATION ended", "info");
+			}
+			if (arg === "plan" || arg.startsWith("plan ")) {
+				const goal = arg.slice("plan".length).trim() || (await ctx.ui.input("SIMULATION: goal of the task", "what should be built?"))?.trim();
+				if (!goal) return;
+				simulation = true;
+				sortieWidget(ctx, "SIMULATION", "accent", `plan only: code locked, ${PLAN_FILE} and ${NOTES_FILE} open · /magi execute when ready`);
+				return pi.sendUserMessage(simulationPrompt(goal));
+			}
+			if (arg === "execute") return execute(ctx);
 			if (arg === "config") return configureMagi(ctx);
 			if (arg === "mecha") {
 				if (ctx.mode !== "tui" || !swap.base) return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap model", "error");
