@@ -52,7 +52,7 @@ import {
 	type HygieneOptions,
 	type HygieneStats,
 } from "./local-models.ts";
-import { NOTES_FILE, PLAN_FILE, liftOffPrompt, parsePlan, planProblem, progressBar, simulationPrompt, tickStep, type PlanStep } from "./sortie.ts";
+import { NOTES_FILE, PLAN_FILE, changedPaths, liftOffPrompt, parsePlan, planProblem, progressBar, simulationPrompt, tickStep, touches, type PlanStep } from "./sortie.ts";
 
 /* ────────────────────────────────────────────────────────────── art ── */
 
@@ -1546,15 +1546,18 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
 /** /magi arguments that manage the theme instead of asking the council. */
-const UI_ARGS = /^(on|off|panel|compact|status|cost)$|^(hygiene|budget)(\s|$)/i; // anything else is a question
+const UI_ARGS = /^(on|off|panel|compact|status|cost)$|^(hygiene|budget)(\s|$)/i;
 const VERIFY_TIMEOUT_MS = 15 * 60_000; // a LIFT-OFF verify command that runs longer counts as failed
 const FAILURE_TAIL = 3000; // characters of a failed verification shown to the retry
+const COUNCIL_AUTOCLOSE_MS = 4000; // an unattended deliberation stays on screen this long after the verdict
+const COUNCIL_FAILURE_LINES = 12; // lines of the second failure put in the question to the council
 /** /magi arguments offered by autocomplete: the full argument, and what it does. */
 const MAGI_ARGS: [string, string][] = [
 	["plan", "SIMULATION: plan a long task with the model, only PLAN.md and NOTES.md can change"],
 	["plan off", "leave SIMULATION"],
 	["execute", "LIFT-OFF: run PLAN.md one step per fresh session, verify and commit each"],
-	["review", "the council reviews your pending changes before you commit"],
+	["council", "ask the three MAGI a question (recent conversation as context)"],
+	["council review", "the council reviews your pending changes before you commit"],
 	["config", "pick a model for each MAGI"],
 	["mecha", "MECHA SELECT: pick the llama-swap model to activate"],
 	["status", "llama-swap report: speed, tokens, cache hits, errors per model"],
@@ -1632,6 +1635,16 @@ function conversationExcerpt(ctx: ExtensionContext, maxChars = 6000): string {
 	return joined.length > maxChars ? "…" + joined.slice(-maxChars) : joined;
 }
 
+/** The council's verdict on a LIFT-OFF retreat, as the model reads it before resuming the step. */
+function councilBrief(d: Deliberation, step: PlanStep): string {
+	const opinions = d.opinions.map((o) => `${o.unit} (${o.nature}): ${o.error ? "no answer" : `${o.vote}. ${o.text.trim()}`}`).join("\n\n");
+	return `MAGI COUNCIL on the retreat of this step. VERDICT: ${d.verdict ?? "NO QUORUM"} (${d.tally}/3)
+
+${opinions}
+
+Follow the council's advice to finish the step "${step.text}", then run \`${step.verify}\`. If the council says the plan itself is wrong, do not touch ${PLAN_FILE} (MAGI stops on any change to it): write why in ${NOTES_FILE} and stop, the user fixes the plan.`;
+}
+
 const REVIEW_MAX_CHARS = 24_000;
 
 /** Runs a command in the project: exit code 0 or not, with stdout and stderr together. */
@@ -1644,7 +1657,7 @@ async function run(cwd: string, file: string, args: string[], timeout = 60_000):
 	}
 }
 
-/** The pending changes for /magi review: tracked changes against HEAD plus the names of untracked files. */
+/** The pending changes for /magi council review: tracked changes against HEAD plus the names of untracked files. */
 async function pendingChanges(cwd: string): Promise<{ diff: string; untracked: string[] }> {
 	const git = (args: string[]) => promisify(execFile)("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 }).then((r) => r.stdout);
 	let diff: string;
@@ -2204,8 +2217,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setTitle(windowTitle(ctx.cwd, titleDone));
 	};
 
-	pi.registerEntryRenderer("magi-verdict", (entry: any, _options: any, theme: Theme) => {
-		const d = entry.data as Deliberation;
+	const verdictView = (d: Deliberation, theme: Theme) => {
 		return {
 			render(width: number): string[] {
 				const out = [theme.fg("accent", "◆ MAGI COUNCIL") + theme.fg("dim", " :: ") + theme.fg("muted", d.question)];
@@ -2222,7 +2234,10 @@ export default function (pi: ExtensionAPI) {
 			},
 			invalidate() {},
 		};
-	});
+	};
+	pi.registerEntryRenderer("magi-verdict", (entry: any, _options: any, theme: Theme) => verdictView(entry.data, theme));
+	// a verdict sent into the context (LIFT-OFF retreat) looks the same
+	pi.registerMessageRenderer("magi-verdict", (message: any, _options: any, theme: Theme) => verdictView(message.details, theme));
 
 	let metricsTimer: ReturnType<typeof setInterval> | undefined;
 	let unsubscribeInput: (() => void) | undefined;
@@ -2576,8 +2591,11 @@ export default function (pi: ExtensionAPI) {
 		repaint();
 	});
 
-	/** Runs the council on a question with some context, shows the deliberation, stores the verdict. */
-	async function runCouncil(ctx: ExtensionContext, question: string, context: string, contextLabel?: string): Promise<void> {
+	/**
+	 * Runs the council on a question with some context, shows the deliberation, stores the verdict.
+	 * Unattended (LIFT-OFF): the view closes by itself and the caller gets the verdict to use instead of it being stored.
+	 */
+	async function runCouncil(ctx: ExtensionContext, question: string, context: string, contextLabel?: string, unattended = false): Promise<Deliberation | undefined> {
 		const cfg = loadMagiConfig();
 		const project = (ctx.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
 		const prompt = councilPrompt(project, context, question, contextLabel);
@@ -2597,9 +2615,14 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		if (ctx.mode === "tui") {
-			const cancelled = await ctx.ui.custom<boolean>((tui, theme, _keys, done) =>
-				buildDeliberationView(tui, theme, question, opinions, () => finished, done),
-			);
+			const cancelled = await ctx.ui.custom<boolean>((tui, theme, _keys, done) => {
+				let closed = false;
+				const close = (c: boolean) => {
+					if (!closed) (closed = true), done(c);
+				};
+				if (unattended) void all.then(() => setTimeout(() => close(false), COUNCIL_AUTOCLOSE_MS));
+				return buildDeliberationView(tui, theme, question, opinions, () => finished, close);
+			});
 			if (cancelled) {
 				controller.abort();
 				ctx.ui.notify("MAGI deliberation aborted", "warning");
@@ -2609,9 +2632,11 @@ export default function (pi: ExtensionAPI) {
 
 		const final = await all;
 		const { verdict, tally } = tallyVerdict(final.map((o) => o.vote));
-		pi.appendEntry("magi-verdict", { question, opinions: final, verdict, tally } satisfies Deliberation);
+		const deliberation: Deliberation = { question, opinions: final, verdict, tally };
+		if (!unattended) pi.appendEntry("magi-verdict", deliberation);
 		state.lastCouncil = { verdict, tally, question };
 		repaint();
+		return deliberation;
 	}
 
 	/** The line above the editor while a SIMULATION or a LIFT-OFF is on. */
@@ -2668,22 +2693,92 @@ export default function (pi: ExtensionAPI) {
 			withSession: async (ctx) => {
 				const detail = failure ? "✗ UNIT DAMAGED ─ retry 1/1" : "▸";
 				sortieWidget(ctx, label, failure ? "warning" : "accent", `${progressBar(steps.length, index, !!failure)}  ${detail} ${step.text}`);
+				const stoppedByYou = () => {
+					const last = ctx.sessionManager
+						.getBranch()
+						.filter((e: any) => e.type === "message" && e.message.role === "assistant")
+						.at(-1) as any;
+					// Esc during a tool call ends the turn as "error: This operation was aborted", not "aborted"
+					const m = last?.message;
+					if (m?.stopReason !== "aborted" && !(m?.stopReason === "error" && /abort/i.test(m.errorMessage ?? ""))) return false;
+					sortieWidget(ctx, "ABORT", "error", `${label} stopped by you: nothing committed`);
+					return true;
+				};
+				const readPlan = () => readFileSync(join(cwd, PLAN_FILE), "utf8");
+				const planBefore = readPlan();
+				// the verify command and the criteria live in PLAN.md: a step that edits them could grade itself
+				const planChanged = () => {
+					if (readPlan() === planBefore) return false;
+					sortieWidget(ctx, "RETREAT", "error", `${label}: ${PLAN_FILE} changed during the step`);
+					ctx.ui.notify(`LIFT-OFF stopped: ${PLAN_FILE} was changed during "${step.text}": review it, nothing committed`, "error");
+					return true;
+				};
+				const verify = () => run(cwd, "bash", ["-c", step.verify!], VERIFY_TIMEOUT_MS);
+				/** Every gate after the model stops: its verify, a change in its files, no regressions, the council's audit. */
+				const inspect = async (): Promise<{ ok: boolean; out: string; stop?: boolean }> => {
+					const v = await verify();
+					if (!v.ok) return { ok: false, out: `The verification \`${step.verify}\` failed:\n${v.out.slice(-FAILURE_TAIL)}` };
+					const changed = changedPaths((await run(cwd, "git", ["status", "--porcelain", "-uall"])).out);
+					if (!touches(changed, step.files ?? []))
+						return { ok: false, out: `The verification passed but none of the step's files changed (files: ${step.files?.join(", ")}; changed: ${changed.join(", ") || "nothing"}): the step was not done.` };
+					for (const prev of steps.slice(0, index).filter((s) => s.verify)) {
+						sortieWidget(ctx, label, "accent", `${progressBar(steps.length, index)}  ⟳ regression: ${prev.text}`);
+						const r = await run(cwd, "bash", ["-c", prev.verify!], VERIFY_TIMEOUT_MS);
+						if (!r.ok) return { ok: false, out: `This step broke the earlier step "${prev.text}": its verify \`${prev.verify}\` fails now:\n${r.out.slice(-FAILURE_TAIL)}` };
+					}
+					sortieWidget(ctx, label, "accent", `${progressBar(steps.length, index)}  ◆ COUNCIL audits ${step.text}`);
+					await run(cwd, "git", ["add", "-A", "-N"]); // new files show up in the diff with their content
+					const { diff } = await pendingChanges(cwd);
+					const shown = diff.length > REVIEW_MAX_CHARS ? diff.slice(0, REVIEW_MAX_CHARS) + `\n… diff truncated (${diff.length} chars in total)` : diff;
+					const question = `LIFT-OFF audit of the step "${step.text}". Accept criteria: ${step.accept}. Its verify \`${step.verify}\` passed. Does this diff really do the step and meet every criterion? REJECT if any criterion is missing, or if the verify is faked: a hardcoded OK, a weakened threshold, a skipped or trivial assertion, a check that would pass without the work.`;
+					const d = await runCouncil(ctx, question, "```diff\n" + shown + "\n```", "Step diff (git diff HEAD)", true);
+					if (!d) {
+						sortieWidget(ctx, "RETREAT", "error", `${label}: audit aborted, work left uncommitted`);
+						return { ok: false, out: "", stop: true };
+					}
+					if (d.verdict === "REJECT") {
+						const why = d.opinions.filter((o) => o.vote === "REJECT").map((o) => `${o.unit}: ${o.text.trim()}`).join("\n\n");
+						return { ok: false, out: `The council rejected the work (${d.tally}/3):\n${why}`.slice(0, FAILURE_TAIL) };
+					}
+					return { ok: true, out: "" };
+				};
+				if (!failure) {
+					// a verify that is already green cannot tell a done step from an untouched one
+					const before = await verify();
+					if (before.ok) {
+						sortieWidget(ctx, "RETREAT", "error", `${label}: verify already passes before the step`);
+						return ctx.ui.notify(`LIFT-OFF stopped: the verify of "${step.text}" passes before any work, so it proves nothing: make it fail without the step, in ${PLAN_FILE}`, "error");
+					}
+				}
 				await ctx.sendUserMessage(liftOffPrompt(step, index + 1, steps.length, failure));
 				await ctx.waitForIdle();
-				const last = ctx.sessionManager
-					.getBranch()
-					.filter((e: any) => e.type === "message" && e.message.role === "assistant")
-					.at(-1) as any;
-				if (last?.message.stopReason === "aborted") {
-					sortieWidget(ctx, "ABORT", "error", `${label} stopped by you: nothing committed`);
-					return;
-				}
-				const check = await run(cwd, "bash", ["-c", step.verify!], VERIFY_TIMEOUT_MS);
+				if (stoppedByYou() || planChanged()) return;
+				let check = await inspect();
+				if (check.stop) return;
+				if (!check.ok && !failure) return liftOff(ctx, origin, launches - 1, check.out);
 				if (!check.ok) {
-					const tail = check.out.slice(-FAILURE_TAIL);
-					if (!failure) return liftOff(ctx, origin, launches - 1, tail);
-					sortieWidget(ctx, "RETREAT", "error", `${label} failed twice: ${tail.trim().split("\n").at(-1) ?? ""}`);
-					return ctx.ui.notify(`LIFT-OFF stopped: "${step.text}" failed its verification twice, work left uncommitted`, "error");
+					// second failure: the MAGI judge it, their verdict enters this session and the model resumes from it
+					sortieWidget(ctx, "RETREAT", "error", `${label} failed twice · the council deliberates`);
+					const output = check.out.trim().split("\n").slice(-COUNCIL_FAILURE_LINES).join(" ↵ ");
+					const question = `LIFT-OFF retreat: the step "${step.text}" failed MAGI's checks twice (verify \`${step.verify}\`, files changed, earlier steps, audit). Last output: ${output} — What should we do: fix the step, split it, or change the plan?`;
+					const d = await runCouncil(ctx, question, conversationExcerpt(ctx), undefined, true);
+					if (!d) {
+						sortieWidget(ctx, "RETREAT", "error", `${label} failed twice, council aborted: work left uncommitted`);
+						return;
+					}
+					sortieWidget(ctx, label, "warning", `${progressBar(steps.length, index, true)}  ◆ COUNCIL ${d.verdict ?? "NO QUORUM"} ─ resuming ${step.text}`);
+					await ctx.sendMessage(
+						{ customType: "magi-verdict", content: councilBrief(d, step), display: true, details: d },
+						{ triggerTurn: true },
+					);
+					await ctx.waitForIdle();
+					if (stoppedByYou() || planChanged()) return;
+					check = await inspect();
+					if (check.stop) return;
+					if (!check.ok) {
+						sortieWidget(ctx, "RETREAT", "error", `${label} failed after the council: ${check.out.trim().split("\n").at(-1) ?? ""}`);
+						return ctx.ui.notify(`LIFT-OFF stopped: "${step.text}" still fails after the council, work left uncommitted`, "error");
+					}
 				}
 				const ticked = tickStep(readFileSync(join(cwd, PLAN_FILE), "utf8"), step.text);
 				if (!ticked) {
@@ -2703,7 +2798,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("magi", {
-		description: "Ask the three MAGI, or manage them: plan [goal] · execute · review [focus] · config · mecha · status · panel · compact · cost · on · off · hygiene · budget (type a space to see them all)",
+		description: "The MAGI: council <question> · council review [focus] · plan [goal] · execute · config · mecha · status · panel · compact · cost · on · off · hygiene · budget (type a space to see them all)",
 		getArgumentCompletions: (prefix) => argCompletions(MAGI_ARGS, prefix),
 		handler: async (args, ctx) => {
 			const arg = args.trim();
@@ -2728,8 +2823,12 @@ export default function (pi: ExtensionAPI) {
 				return pickModel(ctx);
 			}
 
-			if (arg === "review" || arg.startsWith("review ")) {
-				const focus = arg.slice("review".length).trim();
+			if (arg !== "council" && !arg.startsWith("council ")) {
+				return ctx.ui.notify(arg ? `Unknown /magi command "${arg}": to ask the MAGI, /magi council <question>` : "Ask the MAGI with /magi council <question>; type /magi and a space to see every command", arg ? "warning" : "info");
+			}
+			const ask = arg.slice("council".length).trim();
+			if (ask === "review" || ask.startsWith("review ")) {
+				const focus = ask.slice("review".length).trim();
 				let changes: { diff: string; untracked: string[] };
 				try {
 					changes = await pendingChanges(ctx.cwd);
@@ -2749,12 +2848,13 @@ export default function (pi: ExtensionAPI) {
 				const question = focus
 					? `Review these pending changes before committing, focusing on: ${focus}`
 					: "Review these pending changes before committing: are they ready to commit, and what must change first?";
-				return runCouncil(ctx, question, "```diff\n" + diff + "\n```" + untracked, "Pending changes (git diff HEAD)");
+				await runCouncil(ctx, question, "```diff\n" + diff + "\n```" + untracked, "Pending changes (git diff HEAD)");
+				return;
 			}
 
-			const question = arg || (await ctx.ui.input("Question for the MAGI:", "should we …?"))?.trim() || "";
+			const question = ask || (await ctx.ui.input("Question for the MAGI:", "should we …?"))?.trim() || "";
 			if (!question) return;
-			return runCouncil(ctx, question, conversationExcerpt(ctx));
+			await runCouncil(ctx, question, conversationExcerpt(ctx));
 		},
 	});
 

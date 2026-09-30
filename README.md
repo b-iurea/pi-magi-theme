@@ -36,10 +36,10 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 
 | Command | What it does |
 |---------|--------------|
-| `/magi <question>` | the council answers a question (recent conversation as context) |
+| `/magi council <question>` | the council answers a question (recent conversation as context) |
 | `/magi plan [goal]` · `plan off` | SIMULATION: plan a long task with the model; only `PLAN.md` and `NOTES.md` can be written |
 | `/magi execute` | LIFT-OFF: run `PLAN.md` one step per fresh session; MAGI verifies, ticks and commits each step |
-| `/magi review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
+| `/magi council review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
 | `/magi config` | pick a model for each MAGI |
 | `/magi mecha` | MECHA SELECT: pick the llama-swap model to activate, each shown as a mecha head lit by its real state |
 | `/magi compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
@@ -130,8 +130,18 @@ Local models handle short tasks well and long ones badly: the context grows, com
   - [ ] Add the slam test — verify: `npm test -- slam`
   ```
 
-  Every step needs a verify command that exits 0 only when the step works. `NOTES.md` holds what the executor must know: key files, commands that work, decisions, pitfalls.
-- **`/magi execute`: LIFT-OFF.** MAGI commits the plan, then launches the first unticked step in a fresh session that knows only `PLAN.md`, `NOTES.md` and the code. When the model stops, MAGI runs the verify command itself: if it passes, it ticks the step and commits (`LIFT-OFF 3/8: …`), then launches the next. A failed step gets one retry in a fresh session with the failure output; a second failure stops the sortie and leaves the work uncommitted for you to look at. Esc stops it too.
+  Every step uses the standard form, and `/magi execute` refuses a plan with a field missing:
+
+  ```
+  - [ ] 3. Short title
+    - do: what to build, concrete
+    - files: paths or directories the step must change
+    - accept: measurable criteria (a), (b), …
+    - verify: `command that exits 0 only when every criterion holds`
+  ```
+
+  The verify must fail before the step is done, and must measure behaviour, not grep the source. `NOTES.md` holds what the executor must know: key files, commands that work, decisions, pitfalls.
+- **`/magi execute`: LIFT-OFF.** MAGI commits the plan, then launches the first unticked step in a fresh session that knows only `PLAN.md`, `NOTES.md` and the code. Before the session MAGI runs the verify once and refuses a step whose verify already passes (it would prove nothing). When the model stops, MAGI checks it instead of trusting it: `PLAN.md` must be unchanged, the verify must pass, one of the step's `files` must have changed, the verify of every earlier step must still pass, and the council audits the diff against the `accept` criteria (a majority REJECT fails the step). If all hold, it ticks the step and commits (`LIFT-OFF 3/8: …`), then launches the next. A failed step gets one retry in a fresh session with the failure output; after a second failure the council deliberates on it (the failure is in the question), its verdict enters the session and the model resumes the step from it; if the step still fails, the sortie stops and leaves the work uncommitted. Esc stops it too.
 
 A line above the editor shows where you are (`NERV LIFT-OFF 3/8 ■■■▶□□□□ ▸ step`). Each LIFT-OFF is a normal pi session, saved and linked to the one that launched it: open it with `/resume` to see what the model did. The model never reads them: between steps it only has what was written in `NOTES.md`.
 
@@ -139,7 +149,7 @@ LIFT-OFF needs a git repository with no pending changes other than `PLAN.md`, `N
 
 ## The council
 
-`/magi <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
+`/magi council <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
 
 | Unit | Nature | Looks at |
 |------|--------|----------|
@@ -149,7 +159,7 @@ LIFT-OFF needs a git repository with no pending changes other than `PLAN.md`, `N
 
 Each nature is a lens, not a specialty, so the council answers any question, not only software ones. Every MAGI first answers the question, then judges it through its lens, naming concrete tools, numbers and scenarios from your question instead of generic advice. Votes: **APPROVE** = go ahead or clear recommendation; **CONDITIONAL** = only if the named conditions hold, or when information is missing (it says what it needs); **REJECT** = a concrete problem, with what to do instead. A MAGI never rejects because a topic is outside its nature. Answers come back in the language of your question.
 
-`/magi <question>` gives the MAGI the recent conversation as context; `/magi review` gives them the pending diff (truncated at 24k characters). Full opinions are added to the chat (not sent to the agent), and the last verdict stays under the MAGI in the side panel.
+`/magi council <question>` gives the MAGI the recent conversation as context; `/magi council review` gives them the pending diff (truncated at 24k characters). Full opinions are added to the chat (not sent to the agent), and the last verdict stays under the MAGI in the side panel.
 
 ## Configuration
 
