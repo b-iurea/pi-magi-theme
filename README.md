@@ -36,8 +36,8 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 
 | Command | What it does |
 |---------|--------------|
-| `/magi <question>` | the council answers a question (recent conversation as context) |
-| `/magi review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
+| `/magi council <question>` | the council answers a question (recent conversation as context) |
+| `/magi council review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
 | `/magi config` | pick a model for each MAGI |
 | `/magi mecha` | MECHA SELECT: pick the llama-swap model to activate, each shown as a mecha head lit by its real state |
 | `/magi compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
@@ -120,7 +120,7 @@ When the limit is reached llama.cpp does not abort the reply: it inserts the clo
 
 ## The council
 
-`/magi <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
+`/magi council <question>` asks three models in parallel, each with its own nature, then shows the votes and a majority verdict:
 
 | Unit | Nature | Looks at |
 |------|--------|----------|
@@ -130,7 +130,7 @@ When the limit is reached llama.cpp does not abort the reply: it inserts the clo
 
 Each nature is a lens, not a specialty, so the council answers any question, not only software ones. Every MAGI first answers the question, then judges it through its lens, naming concrete tools, numbers and scenarios from your question instead of generic advice. Votes: **APPROVE** = go ahead or clear recommendation; **CONDITIONAL** = only if the named conditions hold, or when information is missing (it says what it needs); **REJECT** = a concrete problem, with what to do instead. A MAGI never rejects because a topic is outside its nature. Answers come back in the language of your question.
 
-`/magi <question>` gives the MAGI the recent conversation as context; `/magi review` gives them the pending diff (truncated at 24k characters). Full opinions are added to the chat (not sent to the agent), and the last verdict stays under the MAGI in the side panel.
+`/magi council <question>` gives the MAGI the recent conversation as context; `/magi council review` gives them the pending diff (truncated at 24k characters). Full opinions are added to the chat (not sent to the agent), and the last verdict stays under the MAGI in the side panel.
 
 ## Configuration
 

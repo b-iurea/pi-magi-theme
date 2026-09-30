@@ -1545,10 +1545,11 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 
 const MAGI_CONFIG_PATH = join(homedir(), ".pi", "agent", "magi.json");
 /** /magi arguments that manage the theme instead of asking the council. */
-const UI_ARGS = /^(on|off|panel|compact|status|cost)$|^(hygiene|budget)(\s|$)/i; // anything else is a question
+const UI_ARGS = /^(on|off|panel|compact|status|cost)$|^(hygiene|budget)(\s|$)/i;
 /** /magi arguments offered by autocomplete: the full argument, and what it does. */
 const MAGI_ARGS: [string, string][] = [
-	["review", "the council reviews your pending changes before you commit"],
+	["council", "ask the three MAGI a question (recent conversation as context)"],
+	["council review", "the council reviews your pending changes before you commit"],
 	["config", "pick a model for each MAGI"],
 	["mecha", "MECHA SELECT: pick the llama-swap model to activate"],
 	["status", "llama-swap report: speed, tokens, cache hits, errors per model"],
@@ -1628,7 +1629,7 @@ function conversationExcerpt(ctx: ExtensionContext, maxChars = 6000): string {
 
 const REVIEW_MAX_CHARS = 24_000;
 
-/** The pending changes for /magi review: tracked changes against HEAD plus the names of untracked files. */
+/** The pending changes for /magi council review: tracked changes against HEAD plus the names of untracked files. */
 async function pendingChanges(cwd: string): Promise<{ diff: string; untracked: string[] }> {
 	const git = (args: string[]) => promisify(execFile)("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 }).then((r) => r.stdout);
 	let diff: string;
@@ -2600,8 +2601,12 @@ export default function (pi: ExtensionAPI) {
 				return pickModel(ctx);
 			}
 
-			if (arg === "review" || arg.startsWith("review ")) {
-				const focus = arg.slice("review".length).trim();
+			if (arg !== "council" && !arg.startsWith("council ")) {
+				return ctx.ui.notify(arg ? `Unknown /magi command "${arg}": to ask the MAGI, /magi council <question>` : "Ask the MAGI with /magi council <question>; type /magi and a space to see every command", arg ? "warning" : "info");
+			}
+			const ask = arg.slice("council".length).trim();
+			if (ask === "review" || ask.startsWith("review ")) {
+				const focus = ask.slice("review".length).trim();
 				let changes: { diff: string; untracked: string[] };
 				try {
 					changes = await pendingChanges(ctx.cwd);
@@ -2624,7 +2629,7 @@ export default function (pi: ExtensionAPI) {
 				return runCouncil(ctx, question, "```diff\n" + diff + "\n```" + untracked, "Pending changes (git diff HEAD)");
 			}
 
-			const question = arg || (await ctx.ui.input("Question for the MAGI:", "should we …?"))?.trim() || "";
+			const question = ask || (await ctx.ui.input("Question for the MAGI:", "should we …?"))?.trim() || "";
 			if (!question) return;
 			return runCouncil(ctx, question, conversationExcerpt(ctx));
 		},
