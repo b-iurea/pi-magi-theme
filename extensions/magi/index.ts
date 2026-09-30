@@ -52,7 +52,8 @@ import {
 	type HygieneOptions,
 	type HygieneStats,
 } from "./local-models.ts";
-import { NOTES_FILE, PLAN_FILE, changedPaths, liftOffPrompt, parsePlan, planProblem, progressBar, simulationPrompt, tickStep, touches, type PlanStep } from "./sortie.ts";
+import { MAGI, MAGI_RULES, MAGI_UNITS, councilPrompt, dissenters, lensNotes, objectionsText, parseVote, voteTally, type MagiUnit, type Vote } from "./council.ts";
+import { NOTES_FILE, PLAN_FILE, addAuditNotes, auditContext, auditQuestion, changedPaths, liftOffPrompt, parsePlan, planProblem, progressBar, simulationPrompt, rebuttalQuestion, tickStep, touches, type PlanStep } from "./sortie.ts";
 
 /* ────────────────────────────────────────────────────────────── art ── */
 
@@ -292,8 +293,6 @@ function mechaUnitsOf(ctx: ExtensionContext, aliases: Map<string, string>): Map<
 	return assignMechaUnits(ids, realOf(def));
 }
 
-const MAGI_UNITS = ["MELCHIOR", "BALTHASAR", "CASPAR"] as const;
-type MagiUnit = (typeof MAGI_UNITS)[number];
 
 function pulseFrames(theme: Theme): string[] {
 	return [
@@ -315,7 +314,6 @@ function flicker(frame: number, unit: number, hold = 2): boolean {
 /* ─────────────────────────────────────────────────────── live state ── */
 
 type Phase = "idle" | "thinking" | "responding" | "tool";
-type Vote = "APPROVE" | "CONDITIONAL" | "REJECT";
 
 const state = {
 	phase: "idle" as Phase,
@@ -1456,57 +1454,6 @@ function voteTone(v: string | null | undefined): "success" | "warning" | "error"
 	return v === "APPROVE" ? "success" : v === "CONDITIONAL" ? "warning" : "error";
 }
 
-/**
- * Three minds, three lenses. A lens works on any subject (a nature, not a specialty), so no MAGI
- * rejects a question just because it is not "its" topic; software is where each lens gets sharpest.
- */
-const MAGI = [
-	{
-		unit: "MELCHIOR",
-		nature: "PRAGMATIST",
-		persona:
-			"You are MELCHIOR, the pragmatist of the MAGI council. Your lens works on any subject: what actually solves the problem " +
-			"at hand, the simplest path that works, effort and cost versus value, what can be done now with what already exists, " +
-			"and what is unnecessary. In software this means: reuse the current stack and existing code, avoid over-engineering, " +
-			"speculative abstractions and extra dependencies, ship sooner.",
-	},
-	{
-		unit: "BALTHASAR",
-		nature: "GUARDIAN",
-		persona:
-			"You are BALTHASAR, the guardian of the MAGI council. Your lens works on any subject: what can go wrong, how badly and " +
-			"for whom, whether the choice can be undone, which safety nets are missing, the hidden and long-term costs, and what " +
-			"must be protected. In software this means: failure modes, security, data safety, operability (monitoring, rollback, " +
-			"being paged at 3am), maintainability and backward compatibility.",
-	},
-	{
-		unit: "CASPAR",
-		nature: "VISIONARY",
-		persona:
-			"You are CASPAR, the visionary of the MAGI council. Your lens works on any subject: whether the question is framed right, " +
-			"better or unconventional alternatives, the experience of the people involved, and where the choice leads over time " +
-			"and what it unlocks. In software this means: design alternatives, developer and user experience, how the system " +
-			"evolves over the next year. Always name at least one concrete alternative the other two would likely miss.",
-	},
-] as const satisfies readonly { unit: MagiUnit; nature: string; persona: string }[];
-
-const MAGI_RULES = `You are one of the three MAGI. The council answers whatever the user asks: mostly software engineering, but not only.
-
-Your nature is a lens, not a specialty, so competence is never a reason to reject. Whatever the subject, first work out the best answer to the question itself, then judge it through your lens. The other two MAGI cover the other lenses: stay in yours.
-
-Be specific to this question. Every bullet must name something concrete from the question or the conversation: a tool, a number, a scenario, a step, a cost. Never write advice that would fit any question, such as "consider the trade-offs", "it depends", "ensure security" or "test properly".
-
-How to vote:
-- APPROVE: you would go ahead as asked, or you have a clear recommendation.
-- CONDITIONAL: you would go ahead only if specific conditions hold, and you name them. When information is missing, vote CONDITIONAL and say exactly what you need to know and how each answer changes your recommendation.
-- REJECT: your lens finds a concrete problem that makes the proposal a bad idea, and you say what to do instead. Never reject because the topic is outside software or outside your nature, or because details are missing.
-For open questions (which one, how to), give your recommendation and vote on how confident you are in it.
-
-Write in the language of the "Question for the MAGI", even though these instructions and the conversation may be in English.
-Output format, no preamble:
-VOTE: APPROVE | CONDITIONAL | REJECT
-- first bullet: your direct answer or recommendation
-- then up to 4 bullets from your lens: 5 bullets at most in total, about 120 words`;
 
 interface MagiOpinion {
 	unit: string;
@@ -1597,10 +1544,6 @@ function saveMagiConfig(cfg: MagiConfig): void {
 	writeFileSync(MAGI_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
 }
 
-function parseVote(text: string): Vote {
-	const m = /VOTE:\s*\**\s*(APPROVE|CONDITIONAL|REJECT)/i.exec(text);
-	return m ? (m[1]!.toUpperCase() as Vote) : "CONDITIONAL";
-}
 
 /** Majority vote; no majority (all different) → CONDITIONAL; no valid votes → null. */
 function tallyVerdict(votes: (Vote | null)[]): { verdict: Vote | null; tally: number } {
@@ -1646,6 +1589,7 @@ Follow the council's advice to finish the step "${step.text}", then run \`${step
 }
 
 const REVIEW_MAX_CHARS = 24_000;
+const AUDIT_MAX_CHARS = 200_000; // about 60k tokens: a LIFT-OFF step whose diff is larger should be split
 
 /** Runs a command in the project: exit code 0 or not, with stdout and stderr together. */
 async function run(cwd: string, file: string, args: string[], timeout = 60_000): Promise<{ ok: boolean; out: string }> {
@@ -1671,39 +1615,6 @@ async function pendingChanges(cwd: string): Promise<{ diff: string; untracked: s
 	return { diff, untracked };
 }
 
-/** Common function words per language, used to name the reply language explicitly. */
-const LANGUAGE_HINTS: readonly [string, readonly string[]][] = [
-	["Italian", ["il", "lo", "la", "gli", "di", "che", "per", "non", "una", "con", "sono", "come", "perché", "è", "dovrei", "meglio", "mettiamo", "questo", "quale"]],
-	["Spanish", ["el", "los", "las", "que", "para", "por", "es", "cómo", "debería", "mejor", "este", "cuál"]],
-	["French", ["le", "les", "des", "est", "pour", "avec", "dois", "comment", "mieux", "ce", "quel"]],
-	["German", ["der", "die", "das", "und", "ist", "nicht", "für", "mit", "ich", "soll", "wie", "besser"]],
-	["English", ["the", "is", "should", "we", "for", "with", "and", "to", "of", "how", "which", "better"]],
-];
-
-/**
- * Guesses the question's language from function words; undefined when unsure.
- * ponytail: stopword heuristic for five languages, swap in a real detector if other languages matter.
- */
-function guessLanguage(text: string): string | undefined {
-	const words = text.toLowerCase().match(/\p{L}+/gu) ?? [];
-	const scores = LANGUAGE_HINTS.map(([lang, hints]) => [lang, words.filter((w) => hints.includes(w)).length] as const).sort(
-		(a, b) => b[1] - a[1],
-	);
-	const [best, second] = scores;
-	return best![1] >= 2 && best![1] > second![1] ? best![0] : undefined;
-}
-
-/** The user message each MAGI receives. The language reminder sits after the question, where the model reads it last. */
-function councilPrompt(project: string, context: string, question: string, contextLabel = "Recent conversation (context only, may be empty)"): string {
-	const lang = guessLanguage(question);
-	const reminder = lang
-		? `(Write your whole answer in ${lang}, even if technical terms in the question are English.)`
-		: "(Write your whole answer in the language of this question, even if technical terms in it are English.)";
-	return (
-		`Project: ${project}\n\n${contextLabel}:\n<context>\n${context}\n</context>\n\n` +
-		`Question for the MAGI:\n${question}\n\n${reminder}`
-	);
-}
 
 function resolveModel(ctx: ExtensionContext, ref?: string): Model<any> | undefined {
 	if (!ref) return ctx.model;
@@ -2715,7 +2626,7 @@ export default function (pi: ExtensionAPI) {
 				};
 				const verify = () => run(cwd, "bash", ["-c", step.verify!], VERIFY_TIMEOUT_MS);
 				/** Every gate after the model stops: its verify, a change in its files, no regressions, the council's audit. */
-				const inspect = async (): Promise<{ ok: boolean; out: string; stop?: boolean }> => {
+				const inspect = async (): Promise<{ ok: boolean; out: string; stop?: boolean; audit?: string; notes?: { unit: string; notes: string }[] }> => {
 					const v = await verify();
 					if (!v.ok) return { ok: false, out: `The verification \`${step.verify}\` failed:\n${v.out.slice(-FAILURE_TAIL)}` };
 					const changed = changedPaths((await run(cwd, "git", ["status", "--porcelain", "-uall"])).out);
@@ -2728,19 +2639,45 @@ export default function (pi: ExtensionAPI) {
 					}
 					sortieWidget(ctx, label, "accent", `${progressBar(steps.length, index)}  ◆ COUNCIL audits ${step.text}`);
 					await run(cwd, "git", ["add", "-A", "-N"]); // new files show up in the diff with their content
-					const { diff } = await pendingChanges(cwd);
-					const shown = diff.length > REVIEW_MAX_CHARS ? diff.slice(0, REVIEW_MAX_CHARS) + `\n… diff truncated (${diff.length} chars in total)` : diff;
-					const question = `LIFT-OFF audit of the step "${step.text}". Accept criteria: ${step.accept}. Its verify \`${step.verify}\` passed. Does this diff really do the step and meet every criterion? REJECT if any criterion is missing, or if the verify is faked: a hardcoded OK, a weakened threshold, a skipped or trivial assertion, a check that would pass without the work.`;
-					const d = await runCouncil(ctx, question, "```diff\n" + shown + "\n```", "Step diff (git diff HEAD)", true);
-					if (!d) {
-						sortieWidget(ctx, "RETREAT", "error", `${label}: audit aborted, work left uncommitted`);
+					// the whole diff or no audit: a cut diff hides exactly the lines that need judging (NOTES.md is prose, left out)
+					const { out: diff } = await run(cwd, "git", ["diff", "HEAD", "--", ".", `:(exclude)${NOTES_FILE}`]);
+					if (diff.length > AUDIT_MAX_CHARS) {
+						sortieWidget(ctx, "RETREAT", "error", `${label}: diff too large to audit (${diff.length} chars)`);
+						ctx.ui.notify(`LIFT-OFF stopped: the diff of "${step.text}" is ${diff.length} chars, over ${AUDIT_MAX_CHARS}: split the step, work left uncommitted`, "error");
 						return { ok: false, out: "", stop: true };
 					}
-					if (d.verdict === "REJECT") {
-						const why = d.opinions.filter((o) => o.vote === "REJECT").map((o) => `${o.unit}: ${o.text.trim()}`).join("\n\n");
-						return { ok: false, out: `The council rejected the work (${d.tally}/3):\n${why}`.slice(0, FAILURE_TAIL) };
-					}
-					return { ok: true, out: "" };
+					const context = auditContext(diff, AUDIT_MAX_CHARS);
+					const tally = (d: Deliberation) => voteTally(d.opinions);
+					const dissent = (d: Deliberation) => dissenters(d.opinions);
+					const objections = (d: Deliberation) => objectionsText(d.opinions);
+					/** One deliberation, kept in the step's session; undefined when it was aborted or a unit could not vote. */
+					const deliberate = async (question: string): Promise<Deliberation | undefined> => {
+						const d = await runCouncil(ctx, question, context, "Step diff (git diff HEAD)", true);
+						if (!d) {
+							sortieWidget(ctx, "RETREAT", "error", `${label}: audit aborted, work left uncommitted`);
+							return undefined;
+						}
+						pi.appendEntry("magi-verdict", d); // the audit stays in the step's session, whatever it says
+						// consensus needs all three: a unit that could not vote is not an approval
+						if (d.opinions.some((o) => !o.vote)) {
+							sortieWidget(ctx, "RETREAT", "error", `${label}: audit without consensus possible (${tally(d)})`);
+							ctx.ui.notify(`LIFT-OFF stopped: a MAGI could not audit "${step.text}" (${tally(d)}), work left uncommitted`, "error");
+							return undefined;
+						}
+						return d;
+					};
+					// the step passes only on consensus: all three MAGI APPROVE
+					const first = await deliberate(auditQuestion(step));
+					if (!first) return { ok: false, out: "", stop: true };
+					if (!dissent(first).length) return { ok: true, out: "", audit: tally(first), notes: lensNotes(first.opinions) };
+					// a CONDITIONAL or REJECT is put to a second council, which either upholds or refutes each objection
+					sortieWidget(ctx, label, "warning", `${progressBar(steps.length, index)}  ◆ COUNCIL split (${tally(first)}) · second council`);
+					const second = await deliberate(rebuttalQuestion(step, tally(first), objections(first)));
+					if (!second) return { ok: false, out: "", stop: true };
+					const audit = `${tally(first)} → second council: ${tally(second)}`;
+					if (dissent(second).length)
+						return { ok: false, out: `The MAGI did not reach consensus on the work (${audit}). Objections that stand:\n${objections(second)}`.slice(0, FAILURE_TAIL) };
+					return { ok: true, out: "", audit, notes: lensNotes([...first.opinions, ...second.opinions]) };
 				};
 				if (!failure) {
 					// a verify that is already green cannot tell a done step from an untouched one
@@ -2780,6 +2717,11 @@ export default function (pi: ExtensionAPI) {
 						return ctx.ui.notify(`LIFT-OFF stopped: "${step.text}" still fails after the council, work left uncommitted`, "error");
 					}
 				}
+				// what the MAGI noticed beyond the vote goes to the next steps, not to waste
+				if (check.notes?.length) {
+					const notesPath = join(cwd, NOTES_FILE);
+					writeFileSync(notesPath, addAuditNotes(existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "", step.text, check.notes));
+				}
 				const ticked = tickStep(readFileSync(join(cwd, PLAN_FILE), "utf8"), step.text);
 				if (!ticked) {
 					sortieWidget(ctx, "RETREAT", "error", `${label}: the step is no longer in ${PLAN_FILE}`);
@@ -2787,7 +2729,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				writeFileSync(join(cwd, PLAN_FILE), ticked);
 				await run(cwd, "git", ["add", "-A"]);
-				const commit = await run(cwd, "git", ["commit", "-qm", `${label}: ${step.text}`]);
+				const commit = await run(cwd, "git", ["commit", "-qm", `${label}: ${step.text}`, "-m", `Audit: ${check.audit}`]);
 				if (!commit.ok) {
 					sortieWidget(ctx, "RETREAT", "error", `${label}: git commit failed`);
 					return ctx.ui.notify(`LIFT-OFF stopped: git commit failed: ${commit.out.trim()}`, "error");

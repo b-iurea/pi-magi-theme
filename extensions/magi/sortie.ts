@@ -119,3 +119,36 @@ Do only this step. Do not change ${PLAN_FILE}, do not tick it and do not commit:
 MAGI checks, not your words: it runs the verify, requires a change in the step's files, re-runs the verify of every earlier step, and the council audits your diff against the accept criteria. A test that passes without measuring (a hardcoded OK, a weakened threshold, a skipped assertion) is rejected. If you cannot finish, say so plainly and write what is missing in ${NOTES_FILE}.
 Before you finish, add to ${NOTES_FILE}, as short bullets under its headings (Key files, Commands that work, Decisions, Pitfalls), what the next steps need to know.${retry}`;
 }
+
+/** The diff as the audit council reads it: fenced, cut at maxChars. */
+export function auditContext(diff: string, maxChars: number): string {
+	const shown = diff.length > maxChars ? diff.slice(0, maxChars) + `\n… diff truncated (${diff.length} chars in total)` : diff;
+	return "```diff\n" + shown + "\n```";
+}
+
+const criteria = (step: PlanStep) => `Accept criteria: ${step.accept}. Its verify \`${step.verify}\` passed.`;
+
+/** What an audit vote may judge, and where everything else goes: a vote on anything else blocks every honest step. */
+const AUDIT_SCOPE = `In this audit your VOTE judges exactly two things: (1) every accept criterion is implemented and really asserted by the verify; (2) the verify is genuine: no hardcoded OK, no weakened threshold, no skipped or trivial assertion, nothing that would pass without the work. APPROVE when both hold. Any other concern from your lens (robustness, cleanup on failure, side effects, style, future risks) never changes the vote: after your bullets write a line \`NOTES:\` and list those concerns there; MAGI records them for the next steps.`;
+
+/** The first audit council: does the diff do the step, and is the verify real? */
+export function auditQuestion(step: PlanStep): string {
+	return `LIFT-OFF audit of the step "${step.text}". ${criteria(step)} ${AUDIT_SCOPE} REJECT when a criterion is missing or the verify is faked, and name it.`;
+}
+
+/** The second audit council: uphold or refute each objection of the first. */
+export function rebuttalQuestion(step: PlanStep, tally: string, objections: string): string {
+	return `LIFT-OFF audit, second council on the step "${step.text}". ${criteria(step)} ${AUDIT_SCOPE} The first council did not reach consensus (${tally}). Its objections:\n\n${objections}\n\nCheck every objection against the diff. An objection stands only if it shows a missing criterion or a faked verify; an objection about anything else does not stand, move it to NOTES. APPROVE when no objection stands; otherwise vote REJECT and name the objection that stands.`;
+}
+
+/** NOTES.md with the audit's notes for a step appended to its Pitfalls section (created when missing). */
+export function addAuditNotes(md: string, step: string, notes: readonly { unit: string; notes: string }[]): string {
+	const block = notes.map((n) => `- **Audit of "${step}", ${n.unit}:** ${n.notes.replace(/\s*\n\s*/g, " ")}`).join("\n");
+	const lines = md.replace(/\s*$/, "").split("\n");
+	const head = lines.findIndex((l) => /^## Pitfalls\s*$/.test(l));
+	if (head < 0) return `${lines.join("\n")}\n\n## Pitfalls\n${block}\n`;
+	const next = lines.findIndex((l, i) => i > head && /^## /.test(l));
+	const at = next < 0 ? lines.length : next;
+	lines.splice(at, 0, ...(next < 0 ? [block] : [block, ""]));
+	return lines.join("\n") + "\n";
+}

@@ -1,7 +1,8 @@
 // Run: node --test test/
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changedPaths, parsePlan, planProblem, progressBar, tickStep, touches } from "../extensions/magi/sortie.ts";
+import { lensNotes, objectionsText, splitNotes } from "../extensions/magi/council.ts";
+import { addAuditNotes, auditQuestion, changedPaths, parsePlan, planProblem, progressBar, rebuttalQuestion, tickStep, touches } from "../extensions/magi/sortie.ts";
 
 const PLAN = `# Plan
 Some context.
@@ -66,4 +67,35 @@ test("progressBar marks done, current and failed steps", () => {
 	assert.equal(progressBar(5, 2), "■■▶□□");
 	assert.equal(progressBar(3, 1, true), "■✗□");
 	assert.equal(progressBar(2, 2), "■■");
+});
+
+test("splitNotes keeps the lens's notes out of the reasons for the vote", () => {
+	assert.deepEqual(splitNotes("- criteria met\nNOTES:\n- no finally on failure"), { reasons: "- criteria met", notes: "- no finally on failure" });
+	assert.deepEqual(splitNotes("- criteria met\n**NOTES:** leaks state"), { reasons: "- criteria met", notes: "leaks state" });
+	assert.deepEqual(splitNotes("- no notes at all"), { reasons: "- no notes at all", notes: "" });
+	const ballots = [
+		{ unit: "MELCHIOR", vote: "APPROVE" as const, text: "- ok\nNOTES:\n- style" },
+		{ unit: "BALTHASAR", vote: "REJECT" as const, text: "- (b) not asserted\nNOTES:\n- cleanup" },
+	];
+	assert.equal(objectionsText(ballots), "BALTHASAR (REJECT): - (b) not asserted");
+	assert.deepEqual(lensNotes(ballots).map((n) => n.notes), ["- style", "- cleanup"]);
+});
+
+test("the audit questions scope the vote to the criteria and ask for NOTES", () => {
+	const [step] = parsePlan("- [ ] 2. X\n  - accept: (a) y\n  - verify: `v`\n  - files: f");
+	for (const q of [auditQuestion(step!), rebuttalQuestion(step!, "M APPROVE", "B: z")]) {
+		assert.match(q, /\(a\) y/);
+		assert.match(q, /never changes the vote/);
+		assert.match(q, /NOTES:/);
+	}
+});
+
+test("addAuditNotes appends to Pitfalls, before the next section, or creates it", () => {
+	const notes = [{ unit: "BALTHASAR", notes: "- no finally\n- leaks spy" }];
+	assert.equal(
+		addAuditNotes("## Decisions\n- d\n\n## Pitfalls\n- p\n\n## Later\n- l\n", "7. Cargo", notes),
+		'## Decisions\n- d\n\n## Pitfalls\n- p\n\n- **Audit of "7. Cargo", BALTHASAR:** - no finally - leaks spy\n\n## Later\n- l\n',
+	);
+	assert.match(addAuditNotes("## Pitfalls\n- p\n", "s", notes), /^## Pitfalls\n- p\n- \*\*Audit of "s"/);
+	assert.match(addAuditNotes("# N\n", "s", notes), /# N\n\n## Pitfalls\n- \*\*Audit/);
 });
