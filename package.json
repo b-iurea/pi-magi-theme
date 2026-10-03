@@ -1,7 +1,7 @@
 {
   "name": "pi-magi-theme",
-  "version": "0.3.1",
-  "description": "MAGI SYSTEM theme + extension for pi (Evangelion fan art): MAGI control screen panel, three-model /magi council, MECHA SELECT model picker, angel-attack loading, seven-seal context gauge, llama-swap telemetry",
+  "version": "0.3.2",
+  "description": "MAGI SYSTEM theme + extension for pi (Evangelion fan art): MAGI control screen panel, three-model /magi council, MECHA SELECT model picker, angel-attack loading, seven-seal context gauge, llama-swap and NInfer telemetry",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -9,7 +9,8 @@
     "pi",
     "magi",
     "evangelion",
-    "llama-swap"
+    "llama-swap",
+    "ninfer"
   ],
   "author": "b-iurea",
   "license": "MIT",

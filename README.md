@@ -1,12 +1,19 @@
 # pi-magi-theme
 
-A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM header, the three MAGI as their control screen in a fixed side panel, live llama-swap telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
+A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM header, the three MAGI as their control screen in a fixed side panel, live llama-swap and [NInfer](https://github.com/b-iurea/ninfer-v100) telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
 
 Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen belong to their creators, all rights reserved to khara, Inc. This project is not affiliated with them. The rest of the symbolism (the Tree of Life, the sephirot, the seven seals) is public domain.
 
 ![pi with the MAGI theme: MAGI SYSTEM header, MECHA SELECT model picker, side panel with the MAGI screen and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
 
 ![The angel attack: red spreads through the MAGI while the model loads into VRAM](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/angel-attack.png)
+
+## What's new in 0.3.2
+
+- **NInfer support.** List your `ninfer-serve` servers in `magi.json` (`"ninfer": { "urls": [...] }`) and their models appear in pi as `ninfer/<id>`, with no `models.json` entry: context window, thinking levels and image input come from what the server publishes. See [NInfer](#ninfer).
+- **NINFER panel section.** With a `ninfer` model the side panel shows GPU, VRAM, RAM, energy, cost and the last request's speed and cache hits, read from the server's `/metrics`, and whether the server is up from `/health`.
+- **Thinking budget on NInfer.** The learned budget (`/magi budget`) is sent as `thinking_budget_tokens`, which NInfer honours like llama-server.
+- Requires a ninfer-serve with capabilities and `/metrics` ([b-iurea/ninfer-v100](https://github.com/b-iurea/ninfer-v100), branch `v3-artifact-support`); an older one still works, with text input and the Qwen low/medium/xhigh levels assumed, and no panel stats.
 
 ## Install
 
@@ -152,7 +159,8 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy by this price, showing the running total of every session with the current one in brackets;
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
 - `hygiene` and `thinkingBudget` are set with `/magi hygiene` and `/magi budget` (`hygiene.minPruneChars` by hand only); `thinkingBudget.message` sends the closing message with every request (default `true`); `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
-- `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
+- `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown);
+- `ninfer`: `{ "urls": ["http://host:8080"], "apiKey": "…" }`, see [NInfer](#ninfer).
 
 ## Release
 
@@ -163,6 +171,18 @@ npm version patch && git push --follow-tags
 ```
 
 No token: npmjs is configured to trust this repository's `publish.yml` (npm trusted publishing, OIDC), which also signs the provenance.
+
+## NInfer
+
+[NInfer](https://github.com/b-iurea/ninfer-v100) `ninfer-serve` loads one model per process. List the servers in `magi.json` (`apiKey` only if they run with `--api-key`):
+
+```json
+"ninfer": { "urls": ["http://192.168.2.220:8080"] }
+```
+
+At startup MAGI reads each server's `/v1/models` and registers its model under the `ninfer` provider (`/model ninfer/<id>`): the context window from `max_model_len`, the thinking levels from `meta.ninfer.reasoning.levels` (sent as `reasoning_effort`, `off` sends `none`) and image input from `architecture.input_modalities` (on when the server runs with `--vision`). A server that is down or still loading is skipped until the next pi start. Add `ninfer/*` to `enabledModels` if you use that filter.
+
+With a `ninfer` session model the side panel shows a NINFER section like the llama-swap one: GPU, VRAM, RAM, energy and cost from `/metrics`, the last request's speed and cache hits, ready or offline from `/health`. The thinking budget is sent as `thinking_budget_tokens`. MECHA SELECT, `/magi status`, the prefix prewarm and the live seals need llama-swap.
 
 ## llama-swap
 
