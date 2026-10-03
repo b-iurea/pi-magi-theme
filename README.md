@@ -46,7 +46,7 @@ Clone the repo and point pi at it instead (edits in the repo are live on the nex
 | `/magi council <question>` | the council answers a question (recent conversation as context) |
 | `/magi council review [focus]` | the council reviews your pending changes (`git diff HEAD` plus untracked file names) before you commit |
 | `/magi config` | pick a model for each MAGI |
-| `/magi mecha` | MECHA SELECT: pick the llama-swap model to activate, each shown as a mecha head lit by its real state |
+| `/magi mecha` | MECHA SELECT: pick the llama-swap or NInfer model to activate, each shown as a mecha head lit by its real state |
 | `/magi compact` | toggle the compact side panel (basic info and animations only); remembered across sessions |
 | `/magi status` | llama-swap report from its last 100 requests: speed, tokens, cache hits, MTP draft acceptance, durations, errors per model |
 | `/magi cost` | set the electricity price per kWh and the currency (EUR or USD) for the COST row |
@@ -69,7 +69,7 @@ Every symbol stands for something real the agent is doing.
 | MELCHIOR · BALTHASAR · CASPAR flickering | the three Magi at work | what the agent **is doing** (thinking, responding, compacting); below them, the **last real `/magi` verdict** | panel |
 | red spreading through BALTHASAR, MELCHIOR, CASPAR | an angel hacking the MAGI | the model is **being loaded into VRAM**, at the pace of its last load; CASPAR's last corner blinks once everything else has fallen | panel |
 | blue taking the MAGI back from that corner | the attack repelled | the model is **loaded** | panel |
-| MECHA-I · II · III · LEGION | units waiting for a pilot | the **llama-swap models**: dormant, waking while loading, eyes lit in VRAM | MECHA SELECT |
+| MECHA-I · II · III · LEGION | units waiting for a pilot | the **llama-swap and NInfer models**: dormant, waking while loading, eyes lit in VRAM (a running ninfer-serve is always in VRAM) | MECHA SELECT |
 | the session's unit, in sync | the unit acts under its pilot | a **tool is running**, with the file or command it works on | panel + footer |
 | the unit going berserk | the leash breaks: red eyes, jaw wide open | a **tool failed** | panel + footer |
 | SYNC | the unit's sync ratio | **tool success rate** | panel + footer |
@@ -182,7 +182,7 @@ No token: npmjs is configured to trust this repository's `publish.yml` (npm trus
 
 At startup MAGI reads each server's `/v1/models` and registers its model under the `ninfer` provider (`/model ninfer/<id>`): the context window from `max_model_len`, the thinking levels from `meta.ninfer.reasoning.levels` (sent as `reasoning_effort`, `off` sends `none`) and image input from `architecture.input_modalities` (on when the server runs with `--vision`). A server that is down or still loading is skipped until the next pi start. Add `ninfer/*` to `enabledModels` if you use that filter.
 
-With a `ninfer` session model the side panel shows a NINFER section like the llama-swap one: GPU, VRAM, RAM, energy and cost from `/metrics`, the last request's speed and cache hits, ready or offline from `/health`. The thinking budget is sent as `thinking_budget_tokens`. MECHA SELECT, `/magi status`, the prefix prewarm and the live seals need llama-swap.
+With a `ninfer` session model the side panel shows a NINFER section like the llama-swap one: GPU, VRAM, RAM, energy and cost from `/metrics`, the last request's speed and cache hits, ready or offline from `/health`. The thinking budget is sent as `thinking_budget_tokens`. NInfer models are MECHA units too: MECHA SELECT shows them in VRAM while their server answers `/health`. `/magi status`, the prefix prewarm and the live seals need llama-swap.
 
 ## llama-swap
 
