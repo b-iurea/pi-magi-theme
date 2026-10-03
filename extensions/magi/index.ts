@@ -275,8 +275,11 @@ function assignMechaUnits(realIds: string[], defaultRealId: string): Map<string,
 	return new Map(order.map((id, i) => [id, units[i] ?? "LEGION"]));
 }
 
+/** Providers whose models are MECHA units: local servers MAGI can watch. */
+const MECHA_PROVIDERS = new Set(["llama-swap", "ninfer"]);
+
 /**
- * The unit of every llama-swap model, stable across /model switches: MECHA-I is settings.json's defaultModel.
+ * The unit of every llama-swap and ninfer model, stable across /model switches: MECHA-I is settings.json's defaultModel.
  * ponytail: reads only the global settings, a project .pi/settings.json override is ignored.
  */
 function mechaUnitsOf(ctx: ExtensionContext, aliases: Map<string, string>): Map<string, MechaUnit> {
@@ -287,7 +290,7 @@ function mechaUnitsOf(ctx: ExtensionContext, aliases: Map<string, string>): Map<
 		// no settings: the session model leads
 	}
 	const realOf = (id: string) => aliases.get(id) ?? id;
-	const ids = ctx.modelRegistry.getAvailable().filter((m) => m.provider === "llama-swap").map((m) => realOf(m.id));
+	const ids = ctx.modelRegistry.getAvailable().filter((m) => MECHA_PROVIDERS.has(m.provider)).map((m) => realOf(m.id));
 	return assignMechaUnits(ids, realOf(def));
 }
 
@@ -913,11 +916,35 @@ function contextUsage(): { tokens: number | null; contextWindow: number; percent
 	return { tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent ?? 0, live: false };
 }
 
+type Getter = (path: string) => Promise<Response>;
+
+/** GET on the llama-swap server whatever the session model is (the MECHA roster spans llama-swap and ninfer). */
+async function llamaSwapGetter(ctx: ExtensionContext): Promise<Getter> {
+	const model = ctx.modelRegistry.getAvailable().find((m) => m.provider === "llama-swap");
+	if (!model?.baseUrl) return () => Promise.reject(new Error("no llama-swap provider"));
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	const base = model.baseUrl.replace(/\/v1\/?$/, "");
+	const headers = {
+		...((auth.ok ? auth.headers : undefined) as Record<string, string> | undefined),
+		...(auth.ok && auth.apiKey ? { Authorization: `Bearer ${auth.apiKey}` } : {}),
+	};
+	return (path) => fetch(base + path, { headers, signal: AbortSignal.timeout(5000) });
+}
+
+/** A ninfer-serve keeps its model resident: up means in VRAM. */
+async function ninferUp(model: Model<any>): Promise<boolean> {
+	try {
+		return (await fetch(`${model.baseUrl!.replace(/\/v1\/?$/, "")}/health`, { signal: AbortSignal.timeout(2000) })).ok;
+	} catch {
+		return false;
+	}
+}
+
 /** id → the model llama-swap actually runs for it: an alias (e.g. "… - Instruct") runs another model. */
-async function swapAliases(): Promise<Map<string, string>> {
+async function swapAliases(get: Getter = swapGet): Promise<Map<string, string>> {
 	const aliases = new Map<string, string>();
 	try {
-		const { data } = (await (await swapGet("/v1/models")).json()) as { data?: any[] };
+		const { data } = (await (await get("/v1/models")).json()) as { data?: any[] };
 		for (const m of data ?? []) {
 			const ls = m.meta?.llamaswap;
 			aliases.set(m.id, ls?.type === "alias" && ls.modelID ? ls.modelID : m.id);
@@ -1033,9 +1060,9 @@ async function discoverNinfer(pi: ExtensionAPI, cfg: MagiConfig["ninfer"]): Prom
 }
 
 /** Models llama-swap keeps in memory: real id → "ready" | "starting" | … (empty when the server is unreachable). */
-async function swapRunning(): Promise<Map<string, string>> {
+async function swapRunning(get: Getter = swapGet): Promise<Map<string, string>> {
 	try {
-		const { running } = (await (await swapGet("/running")).json()) as { running?: { model: string; state: string }[] };
+		const { running } = (await (await get("/running")).json()) as { running?: { model: string; state: string }[] };
 		return new Map((running ?? []).map((r) => [r.model, r.state]));
 	} catch {
 		return new Map();
@@ -1682,7 +1709,7 @@ const MAGI_ARGS: [string, string][] = [
 	["council", "ask the three MAGI a question (recent conversation as context)"],
 	["council review", "the council reviews your pending changes before you commit"],
 	["config", "pick a model for each MAGI"],
-	["mecha", "MECHA SELECT: pick the llama-swap model to activate"],
+	["mecha", "MECHA SELECT: pick the llama-swap or ninfer model to activate"],
 	["status", "llama-swap report: speed, tokens, cache hits, errors per model"],
 	["panel", "hide/show the side panel"],
 	["compact", "toggle the compact side panel"],
@@ -2352,14 +2379,17 @@ export default async function (pi: ExtensionAPI) {
 	/** The picker has the keyboard: keys pressed there must not wake the default model. */
 	let pickerOpen = false;
 
-	/** MECHA SELECT on a new llama-swap session: nothing goes into VRAM until a unit is chosen. */
+	/** MECHA SELECT on a new llama-swap or ninfer session: nothing goes into VRAM until a unit is chosen. */
 	const pickModel = async (ctx: ExtensionContext) => {
 		const current = ctx.model!;
-		const models = ctx.modelRegistry.getAvailable().filter((m) => m.provider === "llama-swap");
+		const models = ctx.modelRegistry.getAvailable().filter((m) => MECHA_PROVIDERS.has(m.provider));
 		if (models.length < 2) return;
 		pickerOpen = true;
 		try {
-			const [aliases, running] = await Promise.all([swapAliases(), swapRunning()]);
+			const get = await llamaSwapGetter(ctx);
+			const ninfer = models.filter((m) => m.provider === "ninfer");
+			const [aliases, running, up] = await Promise.all([swapAliases(get), swapRunning(get), Promise.all(ninfer.map(ninferUp))]);
+			ninfer.forEach((m, i) => up[i] && running.set(m.id, "ready"));
 			const realOf = (m: Model<any>) => aliases.get(m.id) ?? m.id;
 			const units = mechaUnitsOf(ctx, aliases);
 			const rank: MechaUnit[] = ["I", "II", "III", "LEGION"];
@@ -2379,17 +2409,17 @@ export default async function (pi: ExtensionAPI) {
 			if (!picked) return;
 			// same model: pi emits no model_select, so load it here
 			if (picked.model.id === current.id) return void preloadModel(ctx, picked.model);
-			if (!(await pi.setModel(picked.model))) ctx.ui.notify(`${picked.model.id}: no credentials for llama-swap`, "error");
+			if (!(await pi.setModel(picked.model))) ctx.ui.notify(`${picked.model.id}: no credentials for ${picked.model.provider}`, "error");
 		} finally {
 			pickerOpen = false;
 		}
 	};
 
-	/** Which unit acts in the panel: the one the picker gave this session's model. LEGION for anything not llama-swap. */
+	/** Which unit acts in the panel: the one the picker gave this session's model. LEGION for anything not llama-swap or ninfer. */
 	const refreshUnit = async (ctx: ExtensionContext, model: Model<any> | undefined = ctx.model) => {
 		if (!model) return;
 		try {
-			const aliases = await swapAliases();
+			const aliases = await swapAliases(await llamaSwapGetter(ctx));
 			state.unit = mechaUnitsOf(ctx, aliases).get(aliases.get(model.id) ?? model.id) ?? "LEGION";
 		} catch {
 			state.unit = "LEGION"; // llama-swap unreachable: no roster, so the unit is nameless
@@ -2428,7 +2458,7 @@ export default async function (pi: ExtensionAPI) {
 		applyChrome(ctx);
 		// nothing is loaded at startup: a new session picks its MECHA unit, a resumed one shows whether its model is in VRAM
 		const fresh = event.reason === "new" || (event.reason === "startup" && !ctx.sessionManager.getBranch().some((e) => e.type === "message"));
-		void probeModel(ctx).then(() => (fresh && chrome && swap.kind === "llama-swap" ? pickModel(ctx) : undefined));
+		void probeModel(ctx).then(() => (fresh && chrome && swap.kind ? pickModel(ctx) : undefined));
 		// GPU stats every 3s while something happens, every 30s when idle
 		metricsTimer ??= setInterval(() => {
 			const now = Date.now();
@@ -2730,7 +2760,7 @@ export default async function (pi: ExtensionAPI) {
 			if (UI_ARGS.test(arg)) return manageUi(arg, ctx);
 			if (arg === "config") return configureMagi(ctx);
 			if (arg === "mecha") {
-				if (ctx.mode !== "tui" || swap.kind !== "llama-swap") return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap model", "error");
+				if (ctx.mode !== "tui" || !swap.kind) return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap or ninfer model", "error");
 				liveCtx = ctx;
 				return pickModel(ctx);
 			}
