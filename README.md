@@ -173,7 +173,9 @@ No token: npmjs is configured to trust this repository's `publish.yml` (npm trus
 "ninfer": { "urls": ["http://192.168.2.220:8080"] }
 ```
 
-At startup MAGI reads each server's `/v1/models` and registers its model under the `ninfer` provider (`/model ninfer/<id>`), with the context window from `max_model_len`. Thinking is sent as `reasoning_effort`: `/thinking` offers `low`, `medium`, `xhigh`, and `off` sends `none`. A server that is down or still loading is skipped until the next pi start. Image input stays off: `/v1/models` doesn't say whether the server runs with `--vision`. Add `ninfer/*` to `enabledModels` if you use that filter.
+At startup MAGI reads each server's `/v1/models` and registers its model under the `ninfer` provider (`/model ninfer/<id>`): the context window from `max_model_len`, the thinking levels from `meta.ninfer.reasoning.levels` (sent as `reasoning_effort`, `off` sends `none`) and image input from `architecture.input_modalities` (on when the server runs with `--vision`). A server that is down or still loading is skipped until the next pi start. Add `ninfer/*` to `enabledModels` if you use that filter.
+
+With a `ninfer` session model the side panel shows a NINFER section like the llama-swap one: GPU, VRAM, RAM, energy and cost from `/metrics`, the last request's speed and cache hits, ready or offline from `/health`. The thinking budget is sent as `thinking_budget_tokens`. MECHA SELECT, `/magi status`, the prefix prewarm and the live seals need llama-swap.
 
 ## llama-swap
 
