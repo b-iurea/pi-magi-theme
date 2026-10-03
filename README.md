@@ -166,6 +166,8 @@ No token: npmjs is configured to trust this repository's `publish.yml` (npm trus
 
 ## llama-swap
 
+**Thinking levels.** [pi-llama-swap](https://www.npmjs.com/package/@danielmeneses/pi-llama-swap) registers every model with reasoning off, so `/thinking` only offers `off`. At session start MAGI reads the reasoning levels llama-swap publishes in `/v1/models` (`meta.llamaswap.reasoning.levels`) and re-registers those models with thinking on: `/thinking` then offers exactly those levels, sent as `chat_template_kwargs` (`enable_thinking`, `reasoning_effort`). Aliases (e.g. the Instruct twin of a Thinking model) stay off, and image input follows `architecture.input_modalities`. A new or renamed model works without a `modelOverrides` entry in `models.json`; entries you keep there still apply on top (e.g. `samplingParams`). The starting level is pi's usual one for a model switch: the level saved for that model (`Ctrl+S` in `/thinking`), else `defaultThinkingLevel`.
+
 When the session model uses the `llama-swap` provider, the side panel:
 
 - loads nothing at startup: a new session opens MECHA SELECT, a resumed one shows whether its model is already in VRAM;
