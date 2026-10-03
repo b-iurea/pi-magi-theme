@@ -907,6 +907,56 @@ async function swapAliases(): Promise<Map<string, string>> {
 	return aliases;
 }
 
+const PI_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * pi-llama-swap registers every model with reasoning off, so /thinking only offers "off".
+ * llama-swap publishes each model's reasoning levels in /v1/models: re-register the provider with them,
+ * sent as chat_template_kwargs (enable_thinking + reasoning_effort). Aliases (the Instruct twins) stay off.
+ * models.json modelOverrides still apply on top.
+ */
+async function enableSwapReasoning(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	const config = ctx.modelRegistry.getRegisteredProviderConfig("llama-swap") as any;
+	if (!config?.models?.length || !config.baseUrl) return;
+	try {
+		const headers: Record<string, string> = config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {};
+		const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/models`, { headers, signal: AbortSignal.timeout(5000) });
+		const { data } = (await res.json()) as { data?: any[] };
+		const meta = new Map((data ?? []).map((m) => [m.id, m]));
+		let changed = false;
+		const models = config.models.map((m: any) => {
+			const entry = meta.get(m.id);
+			const levels: string[] | undefined = entry?.meta?.llamaswap?.reasoning?.levels;
+			const input = entry?.architecture?.input_modalities?.includes("image") ? ["text", "image"] : ["text"];
+			if (!levels?.length || entry.meta.llamaswap.type === "alias") return { ...m, input };
+			changed = true;
+			return {
+				...m,
+				input,
+				reasoning: true,
+				thinkingLevelMap: Object.fromEntries(PI_THINKING_LEVELS.map((l) => [l, levels.includes(l) ? l : null])),
+				compat: {
+					...m.compat,
+					thinkingFormat: "chat-template",
+					chatTemplateKwargs: {
+						enable_thinking: { $var: "thinking.enabled" },
+						preserve_thinking: true,
+						reasoning_effort: { $var: "thinking.effort", omitWhenOff: true },
+					},
+				},
+			};
+		});
+		// ponytail: a /llama-swap refresh re-registers the plain models until the next session start
+		if (!changed) return;
+		ctx.modelRegistry.registerProvider("llama-swap", { ...config, models });
+		// the session already holds the old model object: swap in the new one
+		const fresh = ctx.model?.provider === "llama-swap" ? ctx.modelRegistry.find("llama-swap", ctx.model.id) : undefined;
+		if (fresh?.reasoning) await pi.setModel(fresh);
+	} catch {
+		// server unreachable: models stay as pi-llama-swap registered them
+	}
+}
+
 /** Models llama-swap keeps in memory: real id → "ready" | "starting" | … (empty when the server is unreachable). */
 async function swapRunning(): Promise<Map<string, string>> {
 	try {
@@ -2271,6 +2321,7 @@ export default function (pi: ExtensionAPI) {
 		fixedBudget = { planning: tb.planning ?? BUDGET_DEFAULTS.planning, acting: tb.acting ?? BUDGET_DEFAULTS.acting };
 		budgetMessage = tb.message ?? true;
 		learned = tb.learned ?? {};
+		await enableSwapReasoning(pi, ctx);
 		// the local-model rules live next to AGENTS.md, created once so the user can edit them
 		const rules = join(ctx.cwd, "MAGI.md");
 		if (!existsSync(rules)) {
