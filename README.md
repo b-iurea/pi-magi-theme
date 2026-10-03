@@ -8,6 +8,10 @@ Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen bel
 
 ![The angel attack: red spreads through the MAGI while the model loads into VRAM](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/angel-attack.png)
 
+## What's new in 0.3.3
+
+- **NInfer models in MECHA SELECT.** ninfer-serve models are MECHA units too, shown in VRAM while their server answers `/health`; a ninfer session also opens the picker and `/magi mecha`.
+
 ## What's new in 0.3.2
 
 - **NInfer support.** List your `ninfer-serve` servers in `magi.json` (`"ninfer": { "urls": [...] }`) and their models appear in pi as `ninfer/<id>`, with no `models.json` entry: context window, thinking levels and image input come from what the server publishes. See [NInfer](#ninfer).
