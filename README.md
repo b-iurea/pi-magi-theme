@@ -1,12 +1,19 @@
 # pi-magi-theme
 
-A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM header, the three MAGI as their control screen in a fixed side panel, live llama-swap telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
+A three-mind council theme + extension for [pi](https://pi.dev): a MAGI SYSTEM header, the three MAGI as their control screen in a fixed side panel, live llama-swap and [NInfer](https://github.com/b-iurea/ninfer-v100) telemetry, and `/magi`, a council of three models that votes on your engineering questions and reviews your pending changes.
 
 Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen belong to their creators, all rights reserved to khara, Inc. This project is not affiliated with them. The rest of the symbolism (the Tree of Life, the sephirot, the seven seals) is public domain.
 
 ![pi with the MAGI theme: MAGI SYSTEM header, MECHA SELECT model picker, side panel with the MAGI screen and llama-swap telemetry](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/screenshot.png)
 
 ![The angel attack: red spreads through the MAGI while the model loads into VRAM](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/angel-attack.png)
+
+## What's new in 0.3.2
+
+- **NInfer support.** List your `ninfer-serve` servers in `magi.json` (`"ninfer": { "urls": [...] }`) and their models appear in pi as `ninfer/<id>`, with no `models.json` entry: context window, thinking levels and image input come from what the server publishes. See [NInfer](#ninfer).
+- **NINFER panel section.** With a `ninfer` model the side panel shows GPU, VRAM, RAM, energy, cost and the last request's speed and cache hits, read from the server's `/metrics`, and whether the server is up from `/health`.
+- **Thinking budget on NInfer.** The learned budget (`/magi budget`) is sent as `thinking_budget_tokens`, which NInfer honours like llama-server.
+- Requires a ninfer-serve with capabilities and `/metrics` ([b-iurea/ninfer-v100](https://github.com/b-iurea/ninfer-v100), branch `v3-artifact-support`); an older one still works, with text input and the Qwen low/medium/xhigh levels assumed, and no panel stats.
 
 ## Install
 
