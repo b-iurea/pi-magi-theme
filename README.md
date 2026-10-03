@@ -152,7 +152,8 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `ui.kwhPrice` and `ui.currency` (`EUR` or `USD`): the COST row multiplies the GPU energy by this price, showing the running total of every session with the current one in brackets;
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
 - `hygiene` and `thinkingBudget` are set with `/magi hygiene` and `/magi budget` (`hygiene.minPruneChars` by hand only); `thinkingBudget.message` sends the closing message with every request (default `true`); `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
-- `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown).
+- `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown);
+- `ninfer`: `{ "urls": ["http://host:8080"], "apiKey": "…" }`, see [NInfer](#ninfer).
 
 ## Release
 
@@ -163,6 +164,16 @@ npm version patch && git push --follow-tags
 ```
 
 No token: npmjs is configured to trust this repository's `publish.yml` (npm trusted publishing, OIDC), which also signs the provenance.
+
+## NInfer
+
+[NInfer](https://github.com/b-iurea/ninfer-v100) `ninfer-serve` loads one model per process. List the servers in `magi.json` (`apiKey` only if they run with `--api-key`):
+
+```json
+"ninfer": { "urls": ["http://192.168.2.220:8080"] }
+```
+
+At startup MAGI reads each server's `/v1/models` and registers its model under the `ninfer` provider (`/model ninfer/<id>`), with the context window from `max_model_len`. Thinking is sent as `reasoning_effort`: `/thinking` offers `low`, `medium`, `xhigh`, and `off` sends `none`. A server that is down or still loading is skipped until the next pi start. Image input stays off: `/v1/models` doesn't say whether the server runs with `--vision`. Add `ninfer/*` to `enabledModels` if you use that filter.
 
 ## llama-swap
 

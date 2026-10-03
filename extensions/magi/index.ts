@@ -719,8 +719,9 @@ interface GpuStat {
 
 type SwapState = "off" | "checking" | "loading" | "ready" | "asleep" | "error";
 
-/** Live state of the llama-swap server behind the session model (only when the provider is "llama-swap"). */
+/** Live state of the server behind the session model: llama-swap, or a ninfer-serve (one resident model, no loading). */
 const swap = {
+	kind: "" as "" | "llama-swap" | "ninfer",
 	base: "", // e.g. http://host:9292
 	headers: {} as Record<string, string>,
 	modelId: "", // the id pi uses (may be an alias)
@@ -755,17 +756,22 @@ function swapGet(path: string, timeoutMs = 5000): Promise<Response> {
 	return fetch(swap.base + path, { headers: swap.headers, signal: AbortSignal.timeout(timeoutMs) });
 }
 
-/** Parses llama-swap's Prometheus /metrics into GPU and RAM stats. */
+/** Parses the Prometheus /metrics of llama-swap (llamaswap_*) or ninfer-serve (ninfer_*, same names) into GPU and RAM stats. */
 function parseSwapMetrics(text: string): void {
 	const gpus = new Map<string, GpuStat>();
 	for (const line of text.split("\n")) {
-		const m = /^llamaswap_([a-z_]+)(?:\{([^}]*)\})?\s+(\S+)$/.exec(line);
+		const m = /^(?:llamaswap|ninfer)_([a-z_]+)(?:\{([^}]*)\})?\s+(\S+)$/.exec(line);
 		if (!m) continue;
 		const key = m[1]!;
 		const labels = m[2] ?? "";
 		const value = Number(m[3]);
 		if (key === "memory_used_bytes") swap.ramUsed = value;
 		else if (key === "memory_total_bytes") swap.ramTotal = value;
+		// ninfer-serve has no request history: the last completed request comes with the metrics
+		else if (key === "last_tokens_per_second" && value > 0) swap.srvTps = value;
+		else if (key === "last_prompt_per_second" && value > 0) swap.srvPps = value;
+		else if (key === "last_cache_tokens") swap.cacheTokens = value;
+		else if (key === "last_prompt_tokens") swap.inputTokens = Math.max(0, value - swap.cacheTokens); // llama-swap's input_tokens exclude the cache
 		if (!key.startsWith("gpu_")) continue;
 		const id = /id="([^"]*)"/.exec(labels)?.[1] ?? "0";
 		const gpu = gpus.get(id) ?? { name: /name="([^"]*)"/.exec(labels)?.[1] ?? "GPU", util: 0, memUsed: 0, memTotal: 0, temp: 0, power: 0 };
@@ -834,6 +840,7 @@ async function refreshSwapMetrics(): Promise<void> {
 
 /** Notices when llama-swap unloaded the session model (e.g. its ttl expired) so the panel can say so. */
 async function refreshSwapRunning(): Promise<void> {
+	if (swap.kind === "ninfer") return refreshNinferHealth();
 	if (!swap.base || swap.state !== "ready") return;
 	try {
 		const { running } = (await (await swapGet("/running")).json()) as { running?: { model: string }[] };
@@ -843,8 +850,21 @@ async function refreshSwapRunning(): Promise<void> {
 	}
 }
 
+/** ninfer-serve keeps its model resident: it is ready while /health answers 200. */
+async function refreshNinferHealth(): Promise<void> {
+	try {
+		const res = await swapGet("/health", 3000);
+		if (res.ok) {
+			if (swap.state !== "ready") setSwapState("ready");
+		} else setSwapState("error", `health HTTP ${res.status}`);
+	} catch (err) {
+		setSwapState("error", err instanceof Error ? err.message : String(err));
+	}
+}
+
 /** Server-side token metrics of the most recent request: a single row from /api/metrics/activity. */
 async function refreshSwapActivity(): Promise<void> {
+	if (swap.kind === "ninfer") return refreshSwapMetrics(); // the last request comes with /metrics
 	if (!swap.base) return;
 	try {
 		const { data } = (await (await swapGet("/api/metrics/activity?limit=1")).json()) as { data?: any[] };
@@ -870,7 +890,8 @@ const LIVE_STALE_MS = 2_000;
  * ponytail: with several slots it takes the fullest busy one, assuming it is this session's request.
  */
 async function refreshLiveContext(): Promise<void> {
-	if (!swap.base || swap.state !== "ready") return;
+	// ponytail: ninfer-serve has no /slots, its seals follow pi's estimate
+	if (swap.kind !== "llama-swap" || swap.state !== "ready") return;
 	try {
 		const slots = (await (await swapGet(`/upstream/${encodeURIComponent(swap.realId)}/slots`, 1_500)).json()) as any[];
 		const busy = slots.filter((s) => s.is_processing && s.n_prompt_tokens > 0);
@@ -957,6 +978,60 @@ async function enableSwapReasoning(pi: ExtensionAPI, ctx: ExtensionContext): Pro
 	}
 }
 
+/**
+ * ninfer-serve (NInfer) servers listed in magi.json "ninfer": each loads one model and lists it in /v1/models
+ * (owned_by "ninfer", max_model_len). They are registered as provider "ninfer", one model per server.
+ * Thinking goes as top-level reasoning_effort (NInfer rejects unknown chat_template_kwargs), "none" turns it off;
+ * the levels and image input come from what the server publishes (meta.ninfer.reasoning.levels, architecture.input_modalities).
+ */
+async function discoverNinfer(pi: ExtensionAPI, cfg: MagiConfig["ninfer"]): Promise<void> {
+	if (!cfg?.urls?.length) return;
+	const headers: Record<string, string> = cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {};
+	const lists = await Promise.all(
+		cfg.urls.map(async (url) => {
+			const baseUrl = url.replace(/\/(v1\/?)?$/, "") + "/v1";
+			try {
+				const { data } = (await (await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(3000) })).json()) as { data?: any[] };
+				return (data ?? [])
+					.filter((m) => m.owned_by === "ninfer")
+					.map((m) => {
+						// an older ninfer-serve publishes no capabilities: assume the Qwen effort template, text only
+						const levels: string[] = m.meta?.ninfer?.reasoning?.levels ?? ["low", "medium", "xhigh"];
+						return {
+							id: m.id,
+							name: m.id,
+							baseUrl,
+							reasoning: levels.length > 0,
+							input: m.architecture?.input_modalities?.includes("image") ? ["text", "image"] : ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: m.max_model_len,
+							maxTokens: Math.min(32768, m.max_model_len),
+							thinkingLevelMap: { off: "none", ...Object.fromEntries(PI_THINKING_LEVELS.map((l) => [l, levels.includes(l) ? l : null])) },
+						};
+					});
+			} catch {
+				return []; // server down or still loading: its model is simply not offered
+			}
+		}),
+	);
+	const models = lists.flat();
+	if (!models.length) return;
+	pi.registerProvider("ninfer", {
+		api: "openai-completions",
+		baseUrl: models[0]!.baseUrl,
+		apiKey: cfg.apiKey || "ninfer", // a placeholder keeps the models listed when the server has no --api-key
+		compat: {
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			supportsUsageInStreaming: true,
+			supportsStore: false,
+			supportsStrictMode: false,
+			maxTokensField: "max_tokens",
+		},
+		models,
+	} as any);
+}
+
 /** Models llama-swap keeps in memory: real id → "ready" | "starting" | … (empty when the server is unreachable). */
 async function swapRunning(): Promise<Map<string, string>> {
 	try {
@@ -967,13 +1042,15 @@ async function swapRunning(): Promise<Map<string, string>> {
 	}
 }
 
-/** Points the llama-swap monitor at the server behind `model`, without loading anything; false when llama-swap doesn't serve it. */
+/** Points the monitor at the llama-swap or ninfer-serve behind `model`, without loading anything; false for other providers. */
 async function connectSwap(ctx: ExtensionContext, model: Model<any> | undefined): Promise<boolean> {
-	if (!model || model.provider !== "llama-swap" || !model.baseUrl) {
+	if (!model || (model.provider !== "llama-swap" && model.provider !== "ninfer") || !model.baseUrl) {
 		swap.base = "";
+		swap.kind = "";
 		setSwapState("off");
 		return false;
 	}
+	swap.kind = model.provider;
 	const id = model.id;
 	swap.modelId = id;
 	swap.realId = id;
@@ -986,6 +1063,7 @@ async function connectSwap(ctx: ExtensionContext, model: Model<any> | undefined)
 	};
 	void refreshSwapMetrics();
 	void refreshSwapActivity();
+	if (swap.kind === "ninfer") return true; // one model, no aliases
 	const aliases = await swapAliases();
 	if (swap.modelId !== id) return true;
 	swap.realId = aliases.get(id) ?? id;
@@ -995,6 +1073,7 @@ async function connectSwap(ctx: ExtensionContext, model: Model<any> | undefined)
 /** Shows whether the session model is already in VRAM or asleep, without loading it: typing wakes it. */
 async function probeModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
 	if (!(await connectSwap(ctx, model))) return;
+	if (swap.kind === "ninfer") return refreshNinferHealth();
 	const state = (await swapRunning()).get(swap.realId);
 	if (swap.modelId === model!.id) setSwapState(state === "ready" ? "ready" : "asleep");
 }
@@ -1005,6 +1084,7 @@ async function probeModel(ctx: ExtensionContext, model: Model<any> | undefined =
  */
 async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
 	if (!(await connectSwap(ctx, model))) return;
+	if (swap.kind === "ninfer") return refreshNinferHealth(); // nothing to load: ninfer-serve starts with its model resident
 	const id = model!.id;
 	swap.expectedLoadMs = loadMagiConfig().loads?.[swap.realId] ?? LOAD_DEFAULT_MS;
 
@@ -1055,7 +1135,7 @@ function loadPrefixStore(): Record<string, any> {
 
 /** Keeps the shared part of pi's real llama-swap request; written only when it changes (new tools, another thinking level…). */
 function rememberPrefix(cwd: string, payload: any): void {
-	if (!swap.base || payload?.model !== swap.modelId || payload.messages?.[0]?.role !== "system") return;
+	if (swap.kind !== "llama-swap" || payload?.model !== swap.modelId || payload.messages?.[0]?.role !== "system") return;
 	const { stream, stream_options, max_tokens, max_completion_tokens, messages, ...options } = payload;
 	const body = { ...options, messages: [messages[0]] };
 	const json = JSON.stringify(body);
@@ -1437,7 +1517,7 @@ class MagiPanel implements Component {
 	private swapRows(inner: number, compact: boolean): string[] {
 		if (!swap.base) return [];
 		const th = this.theme;
-		const out = [this.sep(inner, "LLAMA-SWAP")];
+		const out = [this.sep(inner, swap.kind === "ninfer" ? "NINFER" : "LLAMA-SWAP")];
 		const st =
 			swap.state === "ready"
 				? th.fg("success", "IN VRAM")
@@ -1584,6 +1664,7 @@ type MagiConfig = Partial<Record<MagiUnit, MagiUnitConfig>> & {
 	loads?: Record<string, number>; // real model id → ms its last load took
 	totalWh?: number; // GPU energy summed over every session, for the COST row
 	hygiene?: Partial<HygieneOptions> & { enabled?: boolean }; // context pruning for local models, see local-models.ts
+	ninfer?: { urls?: string[]; apiKey?: string }; // ninfer-serve servers to register as provider "ninfer"
 	thinkingBudget?: {
 		mode?: BudgetMode; // auto (learned per model) · fixed · off, set with /magi budget
 		planning?: number; // fixed budgets
@@ -2132,7 +2213,9 @@ function windowTitle(cwd: string, done = false): string {
 	return `${done ? "✓ " : ""}π - Magi - ${dir}`;
 }
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
+	// before startup, like pi-llama-swap: --model and the saved session model must already find it
+	await discoverNinfer(pi, loadMagiConfig().ninfer);
 	let chrome = true;
 	let panelEnabled = true;
 	let tuiRef: TUI | undefined;
@@ -2345,7 +2428,7 @@ export default function (pi: ExtensionAPI) {
 		applyChrome(ctx);
 		// nothing is loaded at startup: a new session picks its MECHA unit, a resumed one shows whether its model is in VRAM
 		const fresh = event.reason === "new" || (event.reason === "startup" && !ctx.sessionManager.getBranch().some((e) => e.type === "message"));
-		void probeModel(ctx).then(() => (fresh && chrome && swap.base ? pickModel(ctx) : undefined));
+		void probeModel(ctx).then(() => (fresh && chrome && swap.kind === "llama-swap" ? pickModel(ctx) : undefined));
 		// GPU stats every 3s while something happens, every 30s when idle
 		metricsTimer ??= setInterval(() => {
 			const now = Date.now();
@@ -2647,7 +2730,7 @@ export default function (pi: ExtensionAPI) {
 			if (UI_ARGS.test(arg)) return manageUi(arg, ctx);
 			if (arg === "config") return configureMagi(ctx);
 			if (arg === "mecha") {
-				if (ctx.mode !== "tui" || !swap.base) return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap model", "error");
+				if (ctx.mode !== "tui" || swap.kind !== "llama-swap") return ctx.ui.notify("MECHA SELECT needs the TUI and a llama-swap model", "error");
 				liveCtx = ctx;
 				return pickModel(ctx);
 			}
@@ -2745,7 +2828,7 @@ export default function (pi: ExtensionAPI) {
 					? "Thinking budget off: llama-server decides. /magi budget auto"
 					: `Thinking budget ${budgetMode.toUpperCase()} · ${model || "no model"}: ${phase("planning")} · ${phase("acting")}` +
 							` · closing message ${budgetMessage ? "on" : "off"}` +
-							(swap.base ? "" : " · applies to llama-swap models only") +
+							(swap.base ? "" : " · applies to llama-swap and ninfer models only") +
 							(budgetIgnored.has(model) ? " · ⚠ llama-server thinks past it: it was started with its own --reasoning-budget (or is too old), which wins" : ""),
 				"info",
 			);
@@ -2790,8 +2873,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (arg === "status") {
-			if (!swap.base) {
-				ctx.ui.notify("/magi status needs a llama-swap session model", "warning");
+			if (swap.kind !== "llama-swap") {
+				ctx.ui.notify("/magi status needs a llama-swap session model (ninfer-serve keeps no request history)", "warning");
 				return;
 			}
 			let report: { data?: ActivityRow[]; total?: number };
