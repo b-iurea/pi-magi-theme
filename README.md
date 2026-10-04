@@ -8,14 +8,19 @@ Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen bel
 
 ![The angel attack: red spreads through the MAGI while the model loads into VRAM](https://raw.githubusercontent.com/b-iurea/pi-magi-theme/main/docs/angel-attack.png)
 
+## What's new in 0.3.4
+
+- **NInfer behind ninfer-proxy.** Each model's own state comes from `/v1/models`: the panel shows IN VRAM, LOADING or ASLEEP instead of OFFLINE, MECHA SELECT lights only the loaded unit, and the API key is sent so a protected proxy answers.
+- **Exact thinking budget on NInfer.** The learned budget counts thinking from the server's `usage.reasoning` instead of estimating it from characters, and recognizes NInfer's cut, so real cuts are no longer recorded as natural thinking.
+
 ## What's new in 0.3.3
 
-- **NInfer models in MECHA SELECT.** ninfer-serve models are MECHA units too, shown in VRAM while their server answers `/health` (behind ninfer-proxy, by each model's own state); a ninfer session also opens the picker and `/magi mecha`.
+- **NInfer models in MECHA SELECT.** ninfer-serve models are MECHA units too, shown in VRAM while their server answers `/health`; a ninfer session also opens the picker and `/magi mecha`.
 
 ## What's new in 0.3.2
 
 - **NInfer support.** List your `ninfer-serve` servers in `magi.json` (`"ninfer": { "urls": [...] }`) and their models appear in pi as `ninfer/<id>`, with no `models.json` entry: context window, thinking levels and image input come from what the server publishes. See [NInfer](#ninfer).
-- **NINFER panel section.** With a `ninfer` model the side panel shows GPU, VRAM, RAM, energy, cost and the last request's speed and cache hits, read from the server's `/metrics`, and whether the model is in VRAM, loading or asleep (ninfer-proxy) or the server is up (`/health`).
+- **NINFER panel section.** With a `ninfer` model the side panel shows GPU, VRAM, RAM, energy, cost and the last request's speed and cache hits, read from the server's `/metrics`, and whether the server is up from `/health`.
 - **Thinking budget on NInfer.** The learned budget (`/magi budget`) is sent as `thinking_budget_tokens`, which NInfer honours like llama-server.
 - Requires a ninfer-serve with capabilities and `/metrics` ([b-iurea/ninfer-v100-turbo](https://github.com/b-iurea/ninfer-v100-turbo), branch `v3-artifact-support`); an older one still works, with text input and the Qwen low/medium/xhigh levels assumed, and no panel stats.
 
