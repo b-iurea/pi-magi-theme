@@ -14,6 +14,7 @@ import {
 	pruneContext,
 	requestPhase,
 	thinkingWasCut,
+	thinkingTokens,
 	type BudgetPhase,
 	type Msg,
 } from "../extensions/magi/local-models.ts";
@@ -131,4 +132,16 @@ test("budget verdict without the server message: cut near the budget, ignored we
 	assert.equal(budgetVerdict(thinking(9000), 4096), "ignored");
 	const withMessage = { role: "assistant", content: [{ type: "thinking", thinking: `short… ${BUDGET_MESSAGE}` }] };
 	assert.equal(budgetVerdict(withMessage, 4096), "cut");
+});
+
+test("NInfer: exact reasoning tokens from usage, and its canonical guidance counts as a cut", () => {
+	// a real cut turn: 17087 chars (~4.2 chars/token) at a 4096 budget; chars/3 would call it "ignored"
+	const exact = { role: "assistant", usage: { reasoning: 4120 }, content: [{ type: "thinking", thinking: "x".repeat(17087) }] };
+	assert.equal(thinkingTokens(exact), 4120);
+	assert.equal(budgetVerdict(exact, 4096), "cut");
+	const canonical = {
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "plan…\n\n Considering the limited time by the user, I have to give the solution based on the thinking directly now.\n" }],
+	};
+	assert.ok(thinkingWasCut(canonical));
 });

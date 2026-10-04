@@ -188,15 +188,25 @@ export function budgetVerdict(m: Msg, budget: number): "cut" | "ignored" | "with
 	return thought > budget * 1.3 ? "ignored" : thought >= budget * 0.9 ? "cut" : "within";
 }
 
-/** Estimated thinking tokens of a reply (same chars/token as the hygiene). */
+/**
+ * Thinking tokens of a reply: exact when the server reports them (usage.reasoning, e.g. ninfer-serve),
+ * else estimated with the hygiene's chars/token (Qwen on NInfer runs ~4.2, so the estimate overshoots there).
+ */
 export function thinkingTokens(m: Msg): number {
+	if (m.usage?.reasoning > 0) return m.usage.reasoning;
 	const chars = (m.content ?? []).reduce((n: number, c: any) => n + (c.type === "thinking" ? (c.thinking?.length ?? 0) : 0), 0);
 	return Math.round(chars / CHARS_PER_TOKEN);
 }
 
-/** Whether llama.cpp cut this message's thinking at the budget. */
+/** NInfer's own guidance at a budget cut, used when the server does not read reasoning_budget_message. */
+const NINFER_BUDGET_MESSAGE = "Considering the limited time by the user, I have to give the solution based on the thinking directly now.";
+
+/** Whether the server cut this message's thinking at the budget: our closing message, or NInfer's canonical one. */
 export function thinkingWasCut(m: Msg): boolean {
-	return (m.content ?? []).some((c: any) => c.type === "thinking" && (c.thinking ?? "").trimEnd().endsWith(BUDGET_MESSAGE));
+	return (m.content ?? []).some((c: any) => {
+		const t = c.type === "thinking" ? (c.thinking ?? "").trimEnd() : "";
+		return t.endsWith(BUDGET_MESSAGE) || t.endsWith(NINFER_BUDGET_MESSAGE);
+	});
 }
 
 /**
