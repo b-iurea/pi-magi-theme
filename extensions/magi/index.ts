@@ -47,6 +47,7 @@ import {
 	thinkingTokens,
 	budgetVerdict,
 	thinkingWasCut,
+	ninferState,
 	type BudgetMode,
 	type BudgetPhase,
 	type HygieneOptions,
@@ -722,7 +723,7 @@ interface GpuStat {
 
 type SwapState = "off" | "checking" | "loading" | "ready" | "asleep" | "error";
 
-/** Live state of the server behind the session model: llama-swap, or a ninfer-serve (one resident model, no loading). */
+/** Live state of the server behind the session model: llama-swap, or NInfer (a ninfer-serve, or ninfer-proxy loading on demand). */
 const swap = {
 	kind: "" as "" | "llama-swap" | "ninfer",
 	base: "", // e.g. http://host:9292
@@ -853,16 +854,14 @@ async function refreshSwapRunning(): Promise<void> {
 	}
 }
 
-/** ninfer-serve keeps its model resident: it is ready while /health answers 200. */
+/** The session's ninfer model: in VRAM, loading or asleep behind ninfer-proxy; a plain ninfer-serve is ready while /health answers. */
 async function refreshNinferHealth(): Promise<void> {
-	try {
-		const res = await swapGet("/health", 3000);
-		if (res.ok) {
-			if (swap.state !== "ready") setSwapState("ready");
-		} else setSwapState("error", `health HTTP ${res.status}`);
-	} catch (err) {
-		setSwapState("error", err instanceof Error ? err.message : String(err));
-	}
+	const id = swap.modelId;
+	const { state, error } = await ninferState(swap.base, id, swap.headers);
+	if (swap.modelId !== id) return;
+	const next: SwapState = state === "ready" ? "ready" : state === "loading" ? "loading" : state === "failed" ? "error" : "asleep";
+	if (next !== swap.state) setSwapState(next, error);
+	else swap.error = error;
 }
 
 /** Server-side token metrics of the most recent request: a single row from /api/metrics/activity. */
@@ -922,22 +921,18 @@ type Getter = (path: string) => Promise<Response>;
 async function llamaSwapGetter(ctx: ExtensionContext): Promise<Getter> {
 	const model = ctx.modelRegistry.getAvailable().find((m) => m.provider === "llama-swap");
 	if (!model?.baseUrl) return () => Promise.reject(new Error("no llama-swap provider"));
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	const base = model.baseUrl.replace(/\/v1\/?$/, "");
-	const headers = {
-		...((auth.ok ? auth.headers : undefined) as Record<string, string> | undefined),
-		...(auth.ok && auth.apiKey ? { Authorization: `Bearer ${auth.apiKey}` } : {}),
-	};
+	const headers = await authHeaders(ctx, model);
 	return (path) => fetch(base + path, { headers, signal: AbortSignal.timeout(5000) });
 }
 
-/** A ninfer-serve keeps its model resident: up means in VRAM. */
-async function ninferUp(model: Model<any>): Promise<boolean> {
-	try {
-		return (await fetch(`${model.baseUrl!.replace(/\/v1\/?$/, "")}/health`, { signal: AbortSignal.timeout(2000) })).ok;
-	} catch {
-		return false;
-	}
+/** Request headers for `model`'s server: its provider's headers plus the API key as a bearer token. */
+async function authHeaders(ctx: ExtensionContext, model: Model<any>): Promise<Record<string, string>> {
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	return {
+		...((auth.ok ? auth.headers : undefined) as Record<string, string> | undefined),
+		...(auth.ok && auth.apiKey ? { Authorization: `Bearer ${auth.apiKey}` } : {}),
+	};
 }
 
 /** id → the model llama-swap actually runs for it: an alias (e.g. "… - Instruct") runs another model. */
@@ -1082,12 +1077,8 @@ async function connectSwap(ctx: ExtensionContext, model: Model<any> | undefined)
 	swap.modelId = id;
 	swap.realId = id;
 	setSwapState("checking");
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	swap.base = model.baseUrl.replace(/\/v1\/?$/, "");
-	swap.headers = {
-		...((auth.ok ? auth.headers : undefined) as Record<string, string> | undefined),
-		...(auth.ok && auth.apiKey ? { Authorization: `Bearer ${auth.apiKey}` } : {}),
-	};
+	swap.headers = await authHeaders(ctx, model);
 	void refreshSwapMetrics();
 	void refreshSwapActivity();
 	if (swap.kind === "ninfer") return true; // one model, no aliases
@@ -1111,7 +1102,7 @@ async function probeModel(ctx: ExtensionContext, model: Model<any> | undefined =
  */
 async function preloadModel(ctx: ExtensionContext, model: Model<any> | undefined = ctx.model): Promise<void> {
 	if (!(await connectSwap(ctx, model))) return;
-	if (swap.kind === "ninfer") return refreshNinferHealth(); // nothing to load: ninfer-serve starts with its model resident
+	if (swap.kind === "ninfer") return refreshNinferHealth(); // nothing to preload: ninfer-proxy loads on the first request
 	const id = model!.id;
 	swap.expectedLoadMs = loadMagiConfig().loads?.[swap.realId] ?? LOAD_DEFAULT_MS;
 
@@ -2166,7 +2157,7 @@ function footerLeft(th: Theme, now = Date.now()): string {
 		);
 	}
 	if (swap.state === "asleep") {
-		return th.fg("muted", "○ MALKUTH") + dim(" · model asleep in llama-swap · type to wake it");
+		return th.fg("muted", "○ MALKUTH") + dim(` · model asleep in ${swap.kind} · type to wake it`);
 	}
 	const last = state.lastRunMs ? ` · last run ${fmtMs(state.lastRunMs)}` : "";
 	return th.fg("success", "○ ") + th.fg("muted", "MALKUTH") + dim(` · the kingdom · at rest${last}`);
@@ -2388,8 +2379,9 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const get = await llamaSwapGetter(ctx);
 			const ninfer = models.filter((m) => m.provider === "ninfer");
-			const [aliases, running, up] = await Promise.all([swapAliases(get), swapRunning(get), Promise.all(ninfer.map(ninferUp))]);
-			ninfer.forEach((m, i) => up[i] && running.set(m.id, "ready"));
+			const ninferStates = (m: Model<any>) => authHeaders(ctx, m).then((h) => ninferState(m.baseUrl!.replace(/\/v1\/?$/, ""), m.id, h));
+			const [aliases, running, states] = await Promise.all([swapAliases(get), swapRunning(get), Promise.all(ninfer.map(ninferStates))]);
+			ninfer.forEach((m, i) => running.set(m.id, states[i]!.state === "loading" ? "starting" : states[i]!.state));
 			const realOf = (m: Model<any>) => aliases.get(m.id) ?? m.id;
 			const units = mechaUnitsOf(ctx, aliases);
 			const rank: MechaUnit[] = ["I", "II", "III", "LEGION"];

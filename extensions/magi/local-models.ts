@@ -214,6 +214,23 @@ export function thinkingWasCut(m: Msg): boolean {
  * English on purpose: Qwen-family models reason in English and follow English rules more reliably.
  * Kept short: it is paid for on every request.
  */
+/**
+ * State of a NInfer model, without loading it. ninfer-proxy fronts several ninfer-serve and publishes each model's
+ * state in /v1/models (meta.state: ready | loading | stopping | stopped | failed); a plain ninfer-serve holds one
+ * resident model, up while /health answers 200.
+ */
+export async function ninferState(base: string, id: string, headers: Record<string, string> = {}): Promise<{ state: string; error: string }> {
+	try {
+		const res = await fetch(`${base}/v1/models`, { headers, signal: AbortSignal.timeout(3000) });
+		const state = res.ok ? ((await res.json()) as { data?: any[] }).data?.find((m) => m.id === id)?.meta?.state : undefined;
+		if (typeof state === "string") return { state, error: state === "failed" ? "model failed to load (see the proxy logs)" : "" };
+		const health = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
+		return health.ok ? { state: "ready", error: "" } : { state: "failed", error: `health HTTP ${health.status}` };
+	} catch (err) {
+		return { state: "failed", error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
 export const MAGI_MD = `# MAGI rules for local models
 
 These rules are appended to the system prompt by the MAGI extension. Edit them freely; delete the file to get the defaults back.

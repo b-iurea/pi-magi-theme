@@ -10,6 +10,7 @@ import {
 	PRUNED_MARK,
 	budgetVerdict,
 	learnedBudget,
+	ninferState,
 	budgetSample,
 	pruneContext,
 	requestPhase,
@@ -144,4 +145,31 @@ test("NInfer: exact reasoning tokens from usage, and its canonical guidance coun
 		content: [{ type: "thinking", thinking: "plan…\n\n Considering the limited time by the user, I have to give the solution based on the thinking directly now.\n" }],
 	};
 	assert.ok(thinkingWasCut(canonical));
+});
+
+test("NInfer state: per model behind ninfer-proxy, /health for a plain ninfer-serve", async () => {
+	const { createServer } = await import("node:http");
+	const serve = (handler: (path: string, auth?: string) => [number, any]) =>
+		new Promise<{ base: string; close: () => void }>((resolve) => {
+			const s = createServer((req, res) => {
+				const [code, body] = handler(req.url!, req.headers.authorization);
+				res.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+			});
+			s.listen(0, "127.0.0.1", () => resolve({ base: `http://127.0.0.1:${(s.address() as any).port}`, close: () => s.close() }));
+		});
+	const proxy = await serve((path, auth) =>
+		auth !== "Bearer k" ? [401, {}] : path === "/v1/models" ? [200, { data: [{ id: "a", meta: { state: "ready" } }, { id: "b", meta: { state: "stopped" } }, { id: "c", meta: { state: "loading" } }] }] : [404, {}],
+	);
+	const plainUp = await serve((path) => (path === "/v1/models" ? [200, { data: [{ id: "x", meta: { ninfer: {} } }] }] : [200, { status: "ok" }]));
+	const plainDown = await serve((path) => (path === "/v1/models" ? [200, { data: [{ id: "x" }] }] : [503, {}]));
+	try {
+		assert.deepEqual(await ninferState(proxy.base, "a", { Authorization: "Bearer k" }), { state: "ready", error: "" });
+		assert.equal((await ninferState(proxy.base, "b", { Authorization: "Bearer k" })).state, "stopped");
+		assert.equal((await ninferState(proxy.base, "c", { Authorization: "Bearer k" })).state, "loading");
+		assert.deepEqual(await ninferState(plainUp.base, "x"), { state: "ready", error: "" });
+		assert.deepEqual(await ninferState(plainDown.base, "x"), { state: "failed", error: "health HTTP 503" });
+		assert.equal((await ninferState("http://127.0.0.1:9", "x")).state, "failed");
+	} finally {
+		[proxy, plainUp, plainDown].forEach((s) => s.close());
+	}
 });
