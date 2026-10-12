@@ -10,6 +10,10 @@ Fan-art theme inspired by Neon Genesis Evangelion: the MAGI and their screen bel
 
 ## What's new in 0.3.4
 
+- **More llama-swap servers.** List them in `magi.json` (`"swaps": { "strix-swap": { "url", "apiKey" } }`) and each becomes a provider of its own, watched like `llama-swap`: MECHA units, loading with the angel attack, prewarm, live seals, GPU telemetry and `/magi status`. The thinking levels, context, output cap and image input come from the server's `/v1/models`, with no `models.json` entry. See [More llama-swap servers](#more-llama-swap-servers).
+- **Halogen support.** [halogen-flash-server](https://github.com/peonist-ai/halogen-flash-server) servers listed in `magi.json` (`"halogen": { "urls": [...] }`) register their model as `halogen/<id>`, a MECHA unit with a HALOGEN panel section; the thinking budget is sent as `thinking_budget_tokens`. See [Halogen](#halogen).
+- **MECHA units per server.** A unit is `provider/model`: the same model name on two servers is two units, and an Instruct alias lights the unit of the model it runs.
+- **Guide: [Engines behind llama-swap](docs/llama-swap-proxy.md).** How to run halogen, gufo and ds4 (DeepSeek V4 Flash) behind one llama-swap, with Thinking and Instruct from one process, and which MAGI features need what from the engine.
 - **NInfer behind ninfer-proxy.** Each model's own state comes from `/v1/models`: the panel shows IN VRAM, LOADING or ASLEEP instead of OFFLINE, MECHA SELECT lights only the loaded unit, and the API key is sent so a protected proxy answers.
 - **Exact thinking budget on NInfer.** The learned budget counts thinking from the server's `usage.reasoning` instead of estimating it from characters, and recognizes NInfer's cut, so real cuts are no longer recorded as natural thinking.
 
@@ -169,7 +173,9 @@ Each nature is a lens, not a specialty, so the council answers any question, not
 - `totalWh`: written by the theme, GPU energy summed over every session (delete the key to reset the COST total);
 - `hygiene` and `thinkingBudget` are set with `/magi hygiene` and `/magi budget` (`hygiene.minPruneChars` by hand only); `thinkingBudget.message` sends the closing message with every request (default `true`); `thinkingBudget.learned` is written by the theme (recent thinking lengths per model and phase);
 - `loads`: written by the theme, how long each llama-swap model took to load last time (paces the angel attack; 60s when unknown);
-- `ninfer`: `{ "urls": ["http://host:8080"], "apiKey": "…" }`, see [NInfer](#ninfer).
+- `ninfer`: `{ "urls": ["http://host:8080"], "apiKey": "…" }`, see [NInfer](#ninfer);
+- `halogen`: `{ "urls": ["http://host:8080"], "apiKey": "…" }`, see [Halogen](#halogen);
+- `swaps`: `{ "<provider>": { "url": "http://host:9292", "apiKey": "…" } }`, see [More llama-swap servers](#more-llama-swap-servers).
 
 ## Release
 
@@ -193,7 +199,21 @@ At startup MAGI reads each server's `/v1/models` and registers its model under t
 
 With a `ninfer` session model the side panel shows a NINFER section like the llama-swap one: GPU, VRAM, RAM, energy and cost from `/metrics`, the last request's speed and cache hits, ready or offline from `/health`; behind ninfer-proxy each model's own state from its `/v1/models` (in VRAM, loading, asleep until a request loads it). The thinking budget is sent as `thinking_budget_tokens`. NInfer models are MECHA units too: MECHA SELECT shows them in VRAM while their server answers `/health`, or behind ninfer-proxy while that model is the one loaded. `/magi status`, the prefix prewarm and the live seals need llama-swap.
 
+## Halogen
+
+[halogen-flash-server](https://github.com/peonist-ai/halogen-flash-server) serves one model (Qwen3.8-Flash-Next on AMD Strix Halo). List the servers in `magi.json` (`apiKey` only if they require one):
+
+```json
+"halogen": { "urls": ["http://192.168.2.193:8080"] }
+```
+
+At startup MAGI reads each server's `/v1/models` and `/health` and registers its model under the `halogen` provider (`/model halogen/<id>`): the context window from `max_model_len`, the output cap from `max_tokens_cap` (at most 32K), the thinking levels from `reasoning_effort_values` (sent as `reasoning_effort`, `off` sends `none`) and image input from `vision.enabled`. A server that is down is skipped until the next pi start. Add `halogen/*` to `enabledModels` if you use that filter.
+
+Halogen models are MECHA units, shown in VRAM while `/health` answers; the side panel shows a HALOGEN section with the server's state. The thinking budget is sent as `thinking_budget_tokens`, and halogen's cut is recognized like NInfer's. Halogen publishes no GPU stats, so there are no VRAM or energy rows; `/magi status`, the prefix prewarm and the live seals need llama-swap.
+
 ## llama-swap
+
+Any OpenAI-compatible engine (halogen, gufo, ds4…) can run behind llama-swap and get the full MAGI panel: see [Engines behind llama-swap](docs/llama-swap-proxy.md).
 
 **Thinking levels.** [pi-llama-swap](https://www.npmjs.com/package/@danielmeneses/pi-llama-swap) registers every model with reasoning off, so `/thinking` only offers `off`. At session start MAGI reads the reasoning levels llama-swap publishes in `/v1/models` (`meta.llamaswap.reasoning.levels`) and re-registers those models with thinking on: `/thinking` then offers exactly those levels, sent as `chat_template_kwargs` (`enable_thinking`, `reasoning_effort`). Aliases (e.g. the Instruct twin of a Thinking model) stay off, and image input follows `architecture.input_modalities`. A new or renamed model works without a `modelOverrides` entry in `models.json`; entries you keep there still apply on top (e.g. `samplingParams`). The starting level is pi's usual one for a model switch: the level saved for that model (`Ctrl+S` in `/thinking`), else `defaultThinkingLevel`.
 
@@ -206,3 +226,13 @@ When the session model uses the `llama-swap` provider, the side panel:
 - notices when llama-swap unloads the model (`/running`), shows it asleep and reloads it as soon as you type;
 - shows VRAM, GPU load/temperature/power, RAM and the GPU energy used in the session from `/metrics` (every 3s while working, every 30s when idle);
 - shows server-measured tok/s, prompt tok/s and KV cache hits of the last request (`/api/metrics/activity?limit=1`).
+
+### More llama-swap servers
+
+pi-llama-swap knows one server. List the others in `magi.json`, each under the provider name you want:
+
+```json
+"swaps": { "strix-swap": { "url": "http://192.168.2.193:9292", "apiKey": "sk-..." } }
+```
+
+At startup MAGI reads each server's `/v1/models` and registers its models under that provider (`/model strix-swap/<id>`), with the same thinking levels, image input and limits as above, and watches it exactly like `llama-swap`: MECHA units (the same model name on two servers is two units), loading with the angel attack, prewarm, live seals, GPU telemetry and `/magi status`. A server that is down is skipped until the next pi start. Add `strix-swap/*` to `enabledModels` if you use that filter.

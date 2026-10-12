@@ -231,6 +231,89 @@ export async function ninferState(base: string, id: string, headers: Record<stri
 	}
 }
 
+/** The thinking levels pi offers, from lowest to highest. */
+export const PI_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * pi models for a halogen-flash-server, from its /v1/models (owned_by "halogen") and /health, which publishes the
+ * capabilities: reasoning_effort_values (sent as reasoning_effort, "none" turns thinking off), vision.enabled and
+ * max_tokens_cap. Without a /health answer the model is text only, with no thinking levels.
+ */
+export function halogenModels(data: any[], health: any, baseUrl: string) {
+	const efforts: string[] = health?.reasoning_effort_values ?? [];
+	const levels = PI_THINKING_LEVELS.filter((l) => efforts.includes(l));
+	return data
+		.filter((m) => m.owned_by === "halogen")
+		.map((m) => ({
+			id: m.id,
+			name: m.id,
+			baseUrl,
+			reasoning: levels.length > 0,
+			input: health?.vision?.enabled ? ["text", "image"] : ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: m.max_model_len,
+			maxTokens: Math.min(32768, m.max_tokens_cap ?? m.max_model_len),
+			thinkingLevelMap: { off: "none", ...Object.fromEntries(PI_THINKING_LEVELS.map((l) => [l, levels.includes(l) ? l : null])) },
+		}));
+}
+
+/** OpenAI-compatible settings of the local servers (llama-server, ninfer-serve, halogen). */
+export const LOCAL_COMPAT = {
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: true,
+	supportsUsageInStreaming: true,
+	supportsStore: false,
+	supportsStrictMode: false,
+	maxTokensField: "max_tokens",
+};
+
+/**
+ * Thinking on a llama-swap model, from the reasoning levels it publishes (meta.llamaswap.reasoning.levels):
+ * sent as chat_template_kwargs (enable_thinking + reasoning_effort), the way llama-server's Qwen templates read it.
+ */
+export function swapThinking(levels: string[], compat: object = {}) {
+	return {
+		reasoning: true,
+		thinkingLevelMap: Object.fromEntries(PI_THINKING_LEVELS.map((l) => [l, levels.includes(l) ? l : null])),
+		compat: {
+			...compat,
+			thinkingFormat: "chat-template",
+			chatTemplateKwargs: {
+				enable_thinking: { $var: "thinking.enabled" },
+				preserve_thinking: true,
+				reasoning_effort: { $var: "thinking.effort", omitWhenOff: true },
+			},
+		},
+	};
+}
+
+/**
+ * pi models for a llama-swap server MAGI registers itself (magi.json "swaps"), from its /v1/models: context from
+ * context_length, output from meta.llamaswap.output_length (at most 32K), image input from architecture.input_modalities.
+ * Aliases (e.g. an Instruct twin with thinking forced off by a filter) get no thinking levels.
+ */
+export function swapModels(data: any[], baseUrl: string) {
+	return data
+		.filter((m) => m.owned_by === "llama-swap")
+		.map((m) => {
+			const ls = m.meta?.llamaswap ?? {};
+			const levels: string[] = ls.reasoning?.levels ?? [];
+			const context = m.context_length ?? 32768;
+			return {
+				id: m.id,
+				name: m.id,
+				baseUrl,
+				reasoning: false,
+				input: m.architecture?.input_modalities?.includes("image") ? ["text", "image"] : ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: context,
+				maxTokens: Math.min(32768, ls.output_length ?? context),
+				compat: LOCAL_COMPAT,
+				...(levels.length && ls.type !== "alias" ? swapThinking(levels, LOCAL_COMPAT) : {}),
+			};
+		});
+}
+
 export const MAGI_MD = `# MAGI rules for local models
 
 These rules are appended to the system prompt by the MAGI extension. Edit them freely; delete the file to get the defaults back.
