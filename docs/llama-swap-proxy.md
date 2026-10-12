@@ -201,7 +201,7 @@ curl http://192.168.2.193:9292/v1/chat/completions \
 
 ## Pitfalls
 
-- **An engine without `/health` shows an error in MAGI.** MAGI loads the model with `GET /upstream/<model>/health` and expects 200; ds4 answers 404 there even when it is loaded. llama-swap itself is fine (`checkEndpoint: /v1/models`), and requests work.
+- **An engine without `/health` shows an error in MAGI.** MAGI loads the model with `GET /upstream/<model>/health` and expects 200; ds4 answers 404 there even when it is loaded. llama-swap itself is fine (`checkEndpoint: /v1/models`), and requests work. A pull request adding `/health` to ds4 is open on [kyuz0/ds4](https://github.com/kyuz0/ds4/pulls); once it lands, switch to `checkEndpoint: /health`.
 - **Memory.** One model at a time is not only a default here: two engines side by side can stall the host for minutes. Leave room for the context: a model file of 81 GiB on 128 GB leaves about 40 GB for KV cache and the OS.
 - **Container left behind.** If a start fails with "name already in use", a container outlived its llama-swap process: `podman ps`, `podman stop <name>`. `--replace` in `cmd` avoids it.
 - **Never `pkill -f` over ssh** with a pattern that also appears in the ssh command line: it kills your own shell. Stop containers by name.
