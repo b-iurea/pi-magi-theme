@@ -10,6 +10,9 @@ import {
 	PRUNED_MARK,
 	budgetVerdict,
 	learnedBudget,
+	ninferState,
+	halogenModels,
+	swapModels,
 	budgetSample,
 	pruneContext,
 	requestPhase,
@@ -144,4 +147,72 @@ test("NInfer: exact reasoning tokens from usage, and its canonical guidance coun
 		content: [{ type: "thinking", thinking: "plan…\n\n Considering the limited time by the user, I have to give the solution based on the thinking directly now.\n" }],
 	};
 	assert.ok(thinkingWasCut(canonical));
+});
+
+test("NInfer state: per model behind ninfer-proxy, /health for a plain ninfer-serve", async () => {
+	const { createServer } = await import("node:http");
+	const serve = (handler: (path: string, auth?: string) => [number, any]) =>
+		new Promise<{ base: string; close: () => void }>((resolve) => {
+			const s = createServer((req, res) => {
+				const [code, body] = handler(req.url!, req.headers.authorization);
+				res.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+			});
+			s.listen(0, "127.0.0.1", () => resolve({ base: `http://127.0.0.1:${(s.address() as any).port}`, close: () => s.close() }));
+		});
+	const proxy = await serve((path, auth) =>
+		auth !== "Bearer k" ? [401, {}] : path === "/v1/models" ? [200, { data: [{ id: "a", meta: { state: "ready" } }, { id: "b", meta: { state: "stopped" } }, { id: "c", meta: { state: "loading" } }] }] : [404, {}],
+	);
+	const plainUp = await serve((path) => (path === "/v1/models" ? [200, { data: [{ id: "x", meta: { ninfer: {} } }] }] : [200, { status: "ok" }]));
+	const plainDown = await serve((path) => (path === "/v1/models" ? [200, { data: [{ id: "x" }] }] : [503, {}]));
+	try {
+		assert.deepEqual(await ninferState(proxy.base, "a", { Authorization: "Bearer k" }), { state: "ready", error: "" });
+		assert.equal((await ninferState(proxy.base, "b", { Authorization: "Bearer k" })).state, "stopped");
+		assert.equal((await ninferState(proxy.base, "c", { Authorization: "Bearer k" })).state, "loading");
+		assert.deepEqual(await ninferState(plainUp.base, "x"), { state: "ready", error: "" });
+		assert.deepEqual(await ninferState(plainDown.base, "x"), { state: "failed", error: "health HTTP 503" });
+		assert.equal((await ninferState("http://127.0.0.1:9", "x")).state, "failed");
+	} finally {
+		[proxy, plainUp, plainDown].forEach((s) => s.close());
+	}
+});
+
+test("halogenModels: capabilities from /health, text only without it", () => {
+	const data = [
+		{ id: "halogen-qwen3.8-flash-next", owned_by: "halogen", max_model_len: 140000, max_tokens_cap: 65536 },
+		{ id: "other", owned_by: "someone" },
+	];
+	const health = { reasoning_effort_values: ["high", "low", "max", "medium", "minimal", "none", "xhigh"], vision: { enabled: true } };
+	const [m, ...rest] = halogenModels(data, health, "http://h:8080/v1");
+	assert.equal(rest.length, 0);
+	assert.equal(m!.baseUrl, "http://h:8080/v1");
+	assert.equal(m!.contextWindow, 140000);
+	assert.equal(m!.maxTokens, 32768);
+	assert.deepEqual(m!.input, ["text", "image"]);
+	assert.equal(m!.reasoning, true);
+	assert.deepEqual(m!.thinkingLevelMap, { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
+
+	const [bare] = halogenModels(data, undefined, "http://h:8080/v1");
+	assert.equal(bare!.reasoning, false);
+	assert.deepEqual(bare!.input, ["text"]);
+});
+
+test("swapModels: llama-swap's /v1/models to pi models, thinking off on aliases", () => {
+	const levels = ["low", "medium", "xhigh"];
+	const data = [
+		{ id: "Qwen3.8 27B - T", owned_by: "llama-swap", context_length: 131072, architecture: { input_modalities: ["text", "image"] }, meta: { llamaswap: { output_length: 65536, reasoning: { levels } } } },
+		{ id: "Qwen3.8 27B - I", owned_by: "llama-swap", context_length: 131072, meta: { llamaswap: { type: "alias", modelID: "Qwen3.8 27B - T", reasoning: { levels } } } },
+		{ id: "Embed", owned_by: "llama-swap" },
+		{ id: "peer/x", owned_by: "someone" },
+	];
+	const [t, i, e, ...rest] = swapModels(data, "http://s:9292/v1");
+	assert.equal(rest.length, 0);
+	assert.deepEqual([t!.contextWindow, t!.maxTokens, t!.input], [131072, 32768, ["text", "image"]]);
+	assert.equal(t!.reasoning, true);
+	assert.equal((t as any).thinkingLevelMap.xhigh, "xhigh");
+	assert.equal((t as any).thinkingLevelMap.high, null);
+	assert.equal((t as any).compat.thinkingFormat, "chat-template");
+	assert.equal((t as any).compat.maxTokensField, "max_tokens");
+	assert.equal(i!.reasoning, false);
+	assert.equal((i as any).thinkingLevelMap, undefined);
+	assert.deepEqual([e!.reasoning, e!.contextWindow, e!.maxTokens, e!.input], [false, 32768, 32768, ["text"]]);
 });
